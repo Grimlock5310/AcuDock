@@ -4,6 +4,8 @@ AcuDock is a collection of Google Colab notebooks that predict how drug-like mol
 
 **No installation required.** Everything runs in your web browser through Google Colab (free).
 
+**Interactive Gradio UI** -- no code editing needed. Each notebook launches a web interface where you fill in forms and click buttons. Optional **GPU-accelerated docking** via Uni-Dock for 1000x+ speedup.
+
 ---
 
 ## Table of Contents
@@ -61,9 +63,9 @@ Imagine you have a lock (a protein involved in a disease) and you want to find t
 1. Go to [Google Colab](https://colab.research.google.com/)
 2. Click **File > Open notebook > GitHub**
 3. Paste this repository's URL and select `AcuDock_QuickDock.ipynb`
-4. Click **Runtime > Run all** from the menu bar
-5. Wait ~5 minutes for installation and docking to complete
-6. Scroll down to see your results and 3D visualization
+4. Run the **first cell** (install) — the runtime will restart automatically
+5. After restart, **skip the install cell** and run the remaining cells
+6. A **Gradio interface** will appear inline — fill in PDB ID and SMILES, click "Run Docking"
 
 ---
 
@@ -84,39 +86,30 @@ Imagine you have a lock (a protein involved in a disease) and you want to find t
 
 **File:** `AcuDock_QuickDock.ipynb`
 
-QuickDock is a step-by-step notebook that walks you through the entire docking process. Each step has an explanation followed by the code that runs it.
+QuickDock launches an interactive **Gradio interface** directly inside Colab. No code editing required — just fill in the form and click "Run Docking".
 
 ### How to Use QuickDock
 
-#### Step 1: Open the notebook
+#### Step 1: Open and install
 
-- Go to [Google Colab](https://colab.research.google.com/)
-- Upload `AcuDock_QuickDock.ipynb` via **File > Upload notebook**, or open it from GitHub
+- Open `AcuDock_QuickDock.ipynb` in [Google Colab](https://colab.research.google.com/)
+- Run the first cell to install dependencies (~2-3 min)
+- The runtime will **auto-restart** — this is normal
 
-#### Step 2: Install packages (automatic)
+#### Step 2: Launch the interface
 
-- The first code cell installs all required software
-- This takes about 2-3 minutes -- you only need to do this once per session
-- Click the play button on the cell, or use **Runtime > Run all** to run everything
+- After restart, **skip the install cell**
+- Run the remaining cells — a Gradio app appears inline
 
-#### Step 3: Set your target
+#### Step 3: Dock your molecule
 
-Find the **Configuration** cell and change these values to match your experiment:
+In the Gradio interface:
+- **PDB ID**: Enter your protein's 4-character code (default: `1HSG` for HIV-1 protease)
+- **SMILES**: Enter your molecule's SMILES string
+- **Engine**: Choose Vina (CPU) or Uni-Dock (GPU) if available
+- Click **"Run Docking"** and wait for results
 
-```python
-# Target protein PDB ID (example: HIV-1 protease)
-PDB_ID = '1HSG'
-
-# Ligand SMILES (example: Indinavir - HIV protease inhibitor)
-LIGAND_SMILES = 'CC(C)(C)NC(=O)...'
-LIGAND_NAME = 'Indinavir'
-```
-
-- **PDB_ID**: The 4-character code for your protein from the [Protein Data Bank](https://www.rcsb.org/). The default `1HSG` is HIV-1 protease, a classic test target.
-- **LIGAND_SMILES**: The SMILES string for your molecule (see [How to Get Molecule SMILES](#how-to-get-molecule-smiles)).
-- **LIGAND_NAME**: Any name you want to give your molecule (for labeling results).
-
-#### Step 4: Adjust docking parameters (optional)
+#### Step 4: Adjust parameters (optional)
 
 ```python
 EXHAUSTIVENESS = 32      # How thorough the search is (8=quick, 32=standard, 64=very thorough)

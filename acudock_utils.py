@@ -1,16 +1,19 @@
 """
-AcuDock Utilities - Shared helper functions for AcuDock Pro notebook.
+AcuDock Utilities - Shared helper functions for AcuDock notebooks.
 
 Provides protein preparation, ligand preparation, docking execution
-(Vina + Gnina), consensus scoring, and visualization utilities.
+(Vina + Gnina + Uni-Dock GPU), consensus scoring, visualization,
+and Gradio-compatible 3D viewer generation.
 
-Designed to be written to disk via %%writefile in Google Colab.
+Designed for use in Google Colab with Gradio interfaces.
 """
 
 import os
 import subprocess
 import tempfile
 import warnings
+import base64
+import uuid
 
 import numpy as np
 import pandas as pd
@@ -395,3 +398,309 @@ def score_interpretation(score):
         return 'Strong (nM range)'
     else:
         return 'Very strong (verify - may be artifact)'
+
+
+# ---------------------------------------------------------------------------
+# GPU Detection & Uni-Dock Integration
+# ---------------------------------------------------------------------------
+
+def check_gpu_available():
+    """Check if an NVIDIA GPU is available (for Uni-Dock)."""
+    try:
+        result = subprocess.run(
+            ['nvidia-smi'], capture_output=True, text=True, timeout=10
+        )
+        return result.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+
+
+def check_unidock_available():
+    """Check if the Uni-Dock binary is on PATH and executable."""
+    try:
+        result = subprocess.run(
+            ['unidock', '--help'], capture_output=True, text=True, timeout=10
+        )
+        return result.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+
+
+def install_unidock_colab():
+    """Install Uni-Dock in Google Colab via conda-forge.
+
+    Uses micromamba for a lightweight install without condacolab.
+    Returns True on success, False on failure.
+    """
+    try:
+        # Install micromamba
+        subprocess.run(
+            'wget -qO- https://micro.mamba.pm/api/micromamba/linux-64/latest | tar -xvj bin/micromamba',
+            shell=True, capture_output=True, timeout=120
+        )
+        # Install unidock
+        result = subprocess.run(
+            './bin/micromamba install -y -n base -c conda-forge unidock',
+            shell=True, capture_output=True, text=True, timeout=600
+        )
+        if result.returncode == 0:
+            # Add to PATH
+            os.environ['PATH'] = './bin:' + os.environ.get('PATH', '')
+            return True
+        return False
+    except Exception:
+        return False
+
+
+def run_unidock(receptor_pdbqt, ligand_pdbqt_files, center, box_size,
+                search_mode='balance', num_modes=9, output_dir='.'):
+    """Run Uni-Dock GPU-accelerated batch docking.
+
+    Uni-Dock achieves >1000x speedup over Vina on GPU by docking many
+    ligands in parallel. Uses the same PDBQT format as Vina.
+
+    Args:
+        receptor_pdbqt: Path to receptor PDBQT.
+        ligand_pdbqt_files: List of paths to ligand PDBQT files.
+        center: [x, y, z] center coordinates in Angstroms.
+        box_size: [x, y, z] box dimensions in Angstroms.
+        search_mode: 'fast', 'balance', or 'detail'.
+        num_modes: Max binding poses per ligand (default 9).
+        output_dir: Directory for output files.
+
+    Returns:
+        dict mapping input basename -> list of (score, rmsd_lb, rmsd_ub).
+
+    Raises:
+        RuntimeError: If Uni-Dock is not available or fails.
+    """
+    if not check_unidock_available():
+        raise RuntimeError(
+            'Uni-Dock not available. Install with: '
+            'conda install -c conda-forge unidock'
+        )
+
+    result_dir = os.path.join(output_dir, 'unidock_results')
+    os.makedirs(result_dir, exist_ok=True)
+
+    cmd = [
+        'unidock',
+        '--receptor', receptor_pdbqt,
+        '--gpu_batch',
+    ] + ligand_pdbqt_files + [
+        '--center_x', str(center[0]),
+        '--center_y', str(center[1]),
+        '--center_z', str(center[2]),
+        '--size_x', str(box_size[0]),
+        '--size_y', str(box_size[1]),
+        '--size_z', str(box_size[2]),
+        '--search_mode', search_mode,
+        '--num_modes', str(num_modes),
+        '--dir', result_dir,
+    ]
+
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
+
+    if result.returncode != 0:
+        raise RuntimeError(f'Uni-Dock failed: {result.stderr}')
+
+    # Parse results from output PDBQT files
+    results = {}
+    for lig_file in ligand_pdbqt_files:
+        basename = os.path.basename(lig_file)
+        out_file = os.path.join(result_dir, basename.replace('.pdbqt', '_out.pdbqt'))
+        if not os.path.exists(out_file):
+            out_file = os.path.join(result_dir, basename)
+        if os.path.exists(out_file):
+            scores = parse_pdbqt_scores(out_file)
+            results[basename] = scores
+
+    return results
+
+
+def run_unidock_single(receptor_pdbqt, ligand_pdbqt, center, box_size,
+                       search_mode='balance', num_modes=20, output_dir='.'):
+    """Run Uni-Dock for a single ligand (convenience wrapper).
+
+    Returns (energies_list, poses_pdbqt_path) matching Vina output format.
+    """
+    result_dir = os.path.join(output_dir, 'unidock_results')
+    os.makedirs(result_dir, exist_ok=True)
+
+    results = run_unidock(
+        receptor_pdbqt, [ligand_pdbqt],
+        center=center, box_size=box_size,
+        search_mode=search_mode, num_modes=num_modes,
+        output_dir=output_dir
+    )
+
+    basename = os.path.basename(ligand_pdbqt)
+    scores = results.get(basename, [])
+
+    # Build energies in Vina format: [(score, rmsd_lb, rmsd_ub), ...]
+    energies = [(s, r1, r2) for s, r1, r2 in scores] if scores else []
+
+    # Locate output poses
+    out_file = os.path.join(result_dir, basename.replace('.pdbqt', '_out.pdbqt'))
+    if not os.path.exists(out_file):
+        out_file = os.path.join(result_dir, basename)
+
+    return energies, out_file
+
+
+def parse_pdbqt_scores(pdbqt_path):
+    """Parse Vina/Uni-Dock scores from a PDBQT output file.
+
+    Looks for REMARK VINA RESULT lines:
+        REMARK VINA RESULT:    -8.2      0.000      0.000
+
+    Returns list of (score, rmsd_lb, rmsd_ub) tuples.
+    """
+    scores = []
+    with open(pdbqt_path, 'r') as f:
+        for line in f:
+            if 'VINA RESULT' in line:
+                parts = line.split()
+                try:
+                    score = float(parts[3])
+                    rmsd_lb = float(parts[4]) if len(parts) > 4 else 0.0
+                    rmsd_ub = float(parts[5]) if len(parts) > 5 else 0.0
+                    scores.append((score, rmsd_lb, rmsd_ub))
+                except (IndexError, ValueError):
+                    pass
+    return scores
+
+
+def extract_pose_from_pdbqt(poses_pdbqt_path, pose_index=0):
+    """Extract a single pose from a multi-model PDBQT file.
+
+    Returns the pose data as a string.
+    """
+    with open(poses_pdbqt_path, 'r') as f:
+        data = f.read()
+
+    models = data.split('MODEL')
+    if len(models) > 1 and pose_index + 1 < len(models):
+        return 'MODEL' + models[pose_index + 1].split('ENDMDL')[0] + 'ENDMDL'
+    return data
+
+
+# ---------------------------------------------------------------------------
+# 3D Viewer HTML (for Gradio)
+# ---------------------------------------------------------------------------
+
+def make_3d_viewer_html(protein_pdb_data, ligand_data=None,
+                        width='100%', height='500px',
+                        protein_style='cartoon', ligand_style='stick'):
+    """Generate an HTML string with an interactive 3Dmol.js viewer.
+
+    Uses the 3Dmol.js library loaded from CDN. Data is base64-encoded
+    to avoid escaping issues. Returns a self-contained HTML snippet
+    suitable for Gradio's gr.HTML() component.
+
+    Args:
+        protein_pdb_data: Protein PDB file contents as string.
+        ligand_data: Optional ligand PDB/PDBQT data as string.
+        width: Viewer width (CSS value).
+        height: Viewer height (CSS value).
+        protein_style: 'cartoon' or 'stick' for protein rendering.
+        ligand_style: 'stick' or 'sphere' for ligand rendering.
+
+    Returns HTML string.
+    """
+    vid = 'viewer_' + uuid.uuid4().hex[:8]
+    prot_b64 = base64.b64encode(protein_pdb_data.encode()).decode()
+
+    js_lines = [
+        f'var el=document.getElementById("{vid}");',
+        'var v=$3Dmol.createViewer(el,{backgroundColor:"white"});',
+        f'v.addModel(atob("{prot_b64}"),"pdb");',
+    ]
+
+    if protein_style == 'cartoon':
+        js_lines.append(
+            'v.setStyle({model:0},{cartoon:{color:"spectrum",opacity:0.8}});'
+        )
+    else:
+        js_lines.append(
+            'v.setStyle({model:0},{stick:{colorscheme:"whiteCarbon",radius:0.1}});'
+        )
+
+    if ligand_data:
+        lig_b64 = base64.b64encode(ligand_data.encode()).decode()
+        js_lines.append(f'v.addModel(atob("{lig_b64}"),"pdb");')
+        if ligand_style == 'stick':
+            js_lines.append(
+                'v.setStyle({model:1},{stick:{colorscheme:"greenCarbon",radius:0.2}});'
+            )
+        else:
+            js_lines.append(
+                'v.setStyle({model:1},{sphere:{scale:0.3,colorscheme:"greenCarbon"}});'
+            )
+        js_lines.append('v.zoomTo({model:1});v.zoom(0.7);')
+    else:
+        js_lines.append('v.zoomTo();')
+
+    js_lines.append('v.render();')
+
+    js_block = '\n'.join(js_lines)
+
+    return f'''<script src="https://3Dmol.org/build/3Dmol-min.js"></script>
+<div id="{vid}" style="width:{width};height:{height};position:relative;"></div>
+<script>(function(){{{js_block}}})();</script>'''
+
+
+def make_multi_pose_html(protein_pdb_data, poses_pdbqt_data, n_poses=3,
+                         width='100%', height='500px'):
+    """Generate HTML overlaying multiple docked poses on the protein.
+
+    Args:
+        protein_pdb_data: Protein PDB file contents.
+        poses_pdbqt_data: Multi-model PDBQT file contents.
+        n_poses: Number of top poses to overlay.
+
+    Returns HTML string.
+    """
+    vid = 'viewer_' + uuid.uuid4().hex[:8]
+    prot_b64 = base64.b64encode(protein_pdb_data.encode()).decode()
+
+    colors = ['green', 'cyan', 'magenta', 'orange', 'yellow']
+    models = poses_pdbqt_data.split('MODEL')
+
+    js_lines = [
+        f'var el=document.getElementById("{vid}");',
+        'var v=$3Dmol.createViewer(el,{backgroundColor:"white"});',
+        f'v.addModel(atob("{prot_b64}"),"pdb");',
+        'v.setStyle({model:0},{cartoon:{color:"white",opacity:0.5}});',
+    ]
+
+    for i in range(min(n_poses, len(models) - 1)):
+        pose = 'MODEL' + models[i + 1].split('ENDMDL')[0] + 'ENDMDL'
+        pose_b64 = base64.b64encode(pose.encode()).decode()
+        color = colors[i % len(colors)]
+        js_lines.append(f'v.addModel(atob("{pose_b64}"),"pdb");')
+        js_lines.append(
+            f'v.setStyle({{model:{i + 1}}},{{stick:{{color:"{color}",radius:0.15}}}});'
+        )
+
+    js_lines.append('v.zoomTo({model:1});v.zoom(0.7);v.render();')
+    js_block = '\n'.join(js_lines)
+
+    return f'''<script src="https://3Dmol.org/build/3Dmol-min.js"></script>
+<div id="{vid}" style="width:{width};height:{height};position:relative;"></div>
+<script>(function(){{{js_block}}})();</script>'''
+
+
+def get_docking_engine_status():
+    """Return a status summary of available docking engines."""
+    engines = ['Vina (CPU): Available']
+    gpu = check_gpu_available()
+    if gpu:
+        engines.append('GPU: Detected (NVIDIA)')
+    else:
+        engines.append('GPU: Not detected')
+    if check_unidock_available():
+        engines.append('Uni-Dock (GPU): Available')
+    else:
+        engines.append('Uni-Dock (GPU): Not installed')
+    return '\n'.join(engines)

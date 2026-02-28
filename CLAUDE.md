@@ -18,6 +18,7 @@
 - [x] Phase 3: Build QuickDock notebook (Approach 1)
 - [x] Phase 4: Build AcuDock Pro notebook (Approach 2)
 - [x] Phase 5: Build AcuDock Scout notebook (Approach 5)
+- [x] Phase 5.5: Add Gradio UI + Uni-Dock GPU acceleration to all notebooks
 - [ ] Phase 6: Testing and validation in Colab
 - [ ] Phase 7: Documentation and examples
 
@@ -31,6 +32,7 @@
 | 2026-02-27 | Approach design | Designed 5 novel notebook approaches with distinct architectures |
 | 2026-02-27 | Ranking matrix | Scored all 5 approaches across 8 criteria (speed, accuracy, UX, etc.) |
 | 2026-02-27 | Implementation | Built top 3 approaches: QuickDock, AcuDock Pro, AcuDock Scout |
+| 2026-02-28 | Gradio UI + Uni-Dock | Added Gradio interfaces to all 3 notebooks, optional GPU-accelerated docking via Uni-Dock |
 
 ---
 
@@ -50,7 +52,7 @@
 - [ ] Create example compound libraries (ZINC subset, DUD-E actives)
 
 ### Low Priority
-- [ ] Add ipywidgets interactivity to all notebooks
+- [x] ~~Add ipywidgets interactivity to all notebooks~~ Replaced with Gradio UI
 - [ ] Create video tutorials / walkthrough documentation
 - [ ] Benchmark against CASF-2016 core set
 - [ ] Implement consensus scoring across all engines
@@ -71,6 +73,8 @@
 | Active learning surrogate | Random Forest (primary) | Fast training, interpretable uncertainty, works with Morgan FPs |
 | Interaction analysis | ProLIF | Generates protein-ligand interaction fingerprints for pose comparison |
 | Top 3 build priority | QuickDock, Pro, Scout | Covers beginner -> intermediate -> advanced; diverse architectures |
+| Interactive UI | Gradio | Renders inline in Colab via iframe, share=True auto-enabled, full web app UX |
+| GPU docking engine | Uni-Dock (optional) | Apache 2.0, 1000x+ speedup on NVIDIA GPU, same PDBQT format as Vina |
 
 ---
 
@@ -164,10 +168,10 @@ chmod +x /usr/local/bin/gnina
 | `deep-research-report (7).md` | Research | 7 prototype workflows + software comparison (File 2) |
 | `deep-research-report (8).md` | Research | 8 AI ideas + implementation roadmaps (File 3) |
 | `requirements.txt` | Complete | Shared Python dependencies |
-| `AcuDock_QuickDock.ipynb` | Complete | Approach 1: Single linear Vina pipeline |
-| `AcuDock_Pro.ipynb` | Complete | Approach 2: Interactive widgets + Gnina CNN |
-| `acudock_utils.py` | Complete | Shared utilities for AcuDock Pro |
-| `AcuDock_Scout.ipynb` | Complete | Approach 5: Active learning virtual screening |
+| `AcuDock_QuickDock.ipynb` | Complete | Approach 1: Gradio UI + Vina/Uni-Dock pipeline |
+| `AcuDock_Pro.ipynb` | Complete | Approach 2: Gradio UI + Gnina CNN + Uni-Dock |
+| `acudock_utils.py` | Complete | Shared utilities (docking, Uni-Dock, 3D viewer) |
+| `AcuDock_Scout.ipynb` | Complete | Approach 5: Gradio UI + active learning + Uni-Dock |
 | `acudock_surrogate.py` | Complete | ML surrogate model for Scout |
 | `acudock_screening.py` | Complete | Batch docking manager for Scout |
 
@@ -205,8 +209,8 @@ seaborn>=0.12.0
 # Protein retrieval
 prody>=2.4.0
 
-# Interactive (Pro notebook)
-ipywidgets>=8.0.0
+# Interactive UI (all notebooks)
+gradio>=4.0.0
 ```
 
 ---
