@@ -179,7 +179,7 @@ chmod +x /usr/local/bin/gnina
 # Core docking
 vina>=1.2.5
 meeko>=0.5.0
-rdkit-pypi>=2023.9.1
+rdkit>=2023.9.1
 
 # Protein preparation
 pdbfixer>=1.9
@@ -215,7 +215,7 @@ ipywidgets>=8.0.0
 
 ```python
 # Install all dependencies
-!pip install -q vina meeko rdkit-pypi prody py3Dmol prolif openbabel-wheel pdbfixer pandas scikit-learn matplotlib seaborn
+!pip install -q vina meeko rdkit prody py3Dmol prolif openbabel-wheel pdbfixer pandas scikit-learn matplotlib seaborn
 
 # Fetch protein
 from prody import fetchPDB
