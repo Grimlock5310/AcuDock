@@ -459,10 +459,17 @@ All notebooks save results as CSV files that you can:
 
 ### "ModuleNotFoundError" or "ImportError"
 
-The installation cell did not complete successfully. Try:
-1. Go to **Runtime > Restart runtime**
-2. Run the installation cell again (the first code cell with `pip install`)
-3. Then run the import cell
+This is the most common issue. Packages like `vina` and `rdkit` contain compiled C code that Python can only load after a runtime restart. The install cell now **automatically restarts the runtime** after installation. After the restart:
+
+1. **Skip the install cell** (it already ran successfully)
+2. Run from the **imports cell** (the second code cell) onward
+
+If you still see the error:
+1. Go to **Runtime > Restart session** manually
+2. **Skip** the install cell
+3. Run from the imports cell onward
+
+Do **not** re-run the install cell after restart -- the packages are already installed.
 
 ### "SMILES parsing error" or "Invalid SMILES"
 
