@@ -175,11 +175,17 @@ def run_gnina_rescore(receptor_pdbqt, poses_pdbqt, output_dir='/content/acudock_
 
     Returns DataFrame with CNN scores, or None if Gnina unavailable.
     """
-    gnina_path = '/usr/local/bin/gnina'
-    if not os.path.isfile(gnina_path):
-        print('Gnina not found. Install with:')
-        print('  !wget -q https://github.com/gnina/gnina/releases/latest/download/gnina -O /usr/local/bin/gnina')
-        print('  !chmod +x /usr/local/bin/gnina')
+    # Check common locations for the gnina binary
+    gnina_path = None
+    for candidate in ['/content/gnina', '/usr/local/bin/gnina']:
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            gnina_path = candidate
+            break
+
+    if gnina_path is None:
+        print('Gnina not found or not executable. Install with:')
+        print('  !wget -q https://github.com/gnina/gnina/releases/latest/download/gnina -O /content/gnina')
+        print('  !chmod +x /content/gnina')
         return None
 
     output_sdf = os.path.join(output_dir, 'gnina_rescored.sdf')
