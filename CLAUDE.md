@@ -106,9 +106,9 @@ All three research files agree: the quality of protein/ligand preparation has mo
 
 ### Gnina Installation on Colab
 ```bash
-# Download pre-built Gnina binary
-wget -q https://github.com/gnina/gnina/releases/latest/download/gnina -O /usr/local/bin/gnina
-chmod +x /usr/local/bin/gnina
+# Download pre-built Gnina v1.3.2 binary (~1.4 GB)
+wget https://github.com/gnina/gnina/releases/download/v1.3.2/gnina.1.3.2 -O /content/gnina
+chmod +x /content/gnina
 ```
 
 ---
