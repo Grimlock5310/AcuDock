@@ -187,7 +187,7 @@ def run_gnina_rescore(receptor_pdbqt, poses_pdbqt, output_dir='/content/acudock_
 
     if gnina_path is None:
         print('Gnina not found or not executable. Install with:')
-        print('  !wget -q https://github.com/gnina/gnina/releases/latest/download/gnina -O /content/gnina')
+        print('  !wget https://github.com/gnina/gnina/releases/download/v1.3.2/gnina.1.3.2 -O /content/gnina')
         print('  !chmod +x /content/gnina')
         return None
 
