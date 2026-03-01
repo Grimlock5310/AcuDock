@@ -426,29 +426,49 @@ def check_unidock_available():
         return False
 
 
-def install_unidock_colab():
-    """Install Uni-Dock in Google Colab via conda-forge.
+def install_unidock_colab(prefix='/content/unidock_env'):
+    """Install Uni-Dock in Google Colab via micromamba + conda-forge.
 
-    Uses micromamba for a lightweight install without condacolab.
+    Creates an isolated conda environment at `prefix/env` containing
+    only the unidock binary and its dependencies. This avoids conflicts
+    with Colab's system Python (no condacolab needed).
+
+    After installation, adds the environment's bin dir to PATH so
+    `check_unidock_available()` will find the binary.
+
     Returns True on success, False on failure.
     """
     try:
-        # Install micromamba
-        subprocess.run(
-            'wget -qO- https://micro.mamba.pm/api/micromamba/linux-64/latest | tar -xvj bin/micromamba',
+        os.makedirs(prefix, exist_ok=True)
+
+        # Download micromamba standalone binary
+        dl_result = subprocess.run(
+            f'wget -qO- https://micro.mamba.pm/api/micromamba/linux-64/latest '
+            f'| tar -xvj -C {prefix}',
             shell=True, capture_output=True, timeout=120
         )
-        # Install unidock
+        if dl_result.returncode != 0:
+            print(f'micromamba download failed: {dl_result.stderr.decode()}')
+            return False
+
+        micromamba = os.path.join(prefix, 'bin', 'micromamba')
+        env_path = os.path.join(prefix, 'env')
+
+        # Create isolated environment with unidock
         result = subprocess.run(
-            './bin/micromamba install -y -n base -c conda-forge unidock',
+            f'{micromamba} create -y -p {env_path} -c conda-forge unidock',
             shell=True, capture_output=True, text=True, timeout=600
         )
-        if result.returncode == 0:
-            # Add to PATH
-            os.environ['PATH'] = './bin:' + os.environ.get('PATH', '')
-            return True
-        return False
-    except Exception:
+        if result.returncode != 0:
+            print(f'Uni-Dock install failed: {result.stderr}')
+            return False
+
+        # Add to PATH
+        env_bin = os.path.join(env_path, 'bin')
+        os.environ['PATH'] = env_bin + ':' + os.environ.get('PATH', '')
+        return True
+    except Exception as e:
+        print(f'Uni-Dock install error: {e}')
         return False
 
 
