@@ -473,7 +473,7 @@ def install_unidock_colab(prefix='/content/unidock_env'):
 
 
 def run_unidock(receptor_pdbqt, ligand_pdbqt_files, center, box_size,
-                search_mode='balance', num_modes=9, output_dir='.'):
+                exhaustiveness=32, num_modes=9, output_dir='.'):
     """Run Uni-Dock GPU-accelerated batch docking.
 
     Uni-Dock achieves >1000x speedup over Vina on GPU by docking many
@@ -484,7 +484,7 @@ def run_unidock(receptor_pdbqt, ligand_pdbqt_files, center, box_size,
         ligand_pdbqt_files: List of paths to ligand PDBQT files.
         center: [x, y, z] center coordinates in Angstroms.
         box_size: [x, y, z] box dimensions in Angstroms.
-        search_mode: 'fast', 'balance', or 'detail'.
+        exhaustiveness: Search thoroughness (default 32, higher = more thorough).
         num_modes: Max binding poses per ligand (default 9).
         output_dir: Directory for output files.
 
@@ -508,21 +508,26 @@ def run_unidock(receptor_pdbqt, ligand_pdbqt_files, center, box_size,
         '--receptor', receptor_pdbqt,
         '--gpu_batch',
     ] + ligand_pdbqt_files + [
+        '--scoring', 'vina',
         '--center_x', str(center[0]),
         '--center_y', str(center[1]),
         '--center_z', str(center[2]),
         '--size_x', str(box_size[0]),
         '--size_y', str(box_size[1]),
         '--size_z', str(box_size[2]),
-        '--search_mode', search_mode,
+        '--exhaustiveness', str(exhaustiveness),
         '--num_modes', str(num_modes),
         '--dir', result_dir,
+        '--seed', '42',
     ]
 
+    print(f'[Uni-Dock] Command: {" ".join(cmd)}')
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
 
+    if result.stderr:
+        print(f'[Uni-Dock] stderr: {result.stderr[:500]}')
     if result.returncode != 0:
-        raise RuntimeError(f'Uni-Dock failed: {result.stderr}')
+        raise RuntimeError(f'Uni-Dock failed (exit code {result.returncode}): {result.stderr}')
 
     # Parse results from output PDBQT files
     results = {}
@@ -534,15 +539,18 @@ def run_unidock(receptor_pdbqt, ligand_pdbqt_files, center, box_size,
         if os.path.exists(out_file):
             scores = parse_pdbqt_scores(out_file)
             results[basename] = scores
+        else:
+            print(f'[Uni-Dock] Warning: no output file for {basename}')
 
     return results
 
 
 def run_unidock_single(receptor_pdbqt, ligand_pdbqt, center, box_size,
-                       search_mode='balance', num_modes=20, output_dir='.'):
+                       exhaustiveness=32, num_modes=20, output_dir='.'):
     """Run Uni-Dock for a single ligand (convenience wrapper).
 
     Returns (energies_list, poses_pdbqt_path) matching Vina output format.
+    Returns ([], None) if docking fails or produces implausible results.
     """
     result_dir = os.path.join(output_dir, 'unidock_results')
     os.makedirs(result_dir, exist_ok=True)
@@ -550,7 +558,7 @@ def run_unidock_single(receptor_pdbqt, ligand_pdbqt, center, box_size,
     results = run_unidock(
         receptor_pdbqt, [ligand_pdbqt],
         center=center, box_size=box_size,
-        search_mode=search_mode, num_modes=num_modes,
+        exhaustiveness=exhaustiveness, num_modes=num_modes,
         output_dir=output_dir
     )
 
@@ -559,6 +567,17 @@ def run_unidock_single(receptor_pdbqt, ligand_pdbqt, center, box_size,
 
     # Build energies in Vina format: [(score, rmsd_lb, rmsd_ub), ...]
     energies = [(s, r1, r2) for s, r1, r2 in scores] if scores else []
+
+    # Validate: scores should be negative for successful docking.
+    # A positive score (e.g. +103) means the GPU search failed.
+    if energies and energies[0][0] > 0:
+        print(f'[Uni-Dock] Warning: best score is {energies[0][0]:.2f} kcal/mol '
+              f'(positive = failed search). Results unreliable.')
+        return [], None
+
+    if not energies:
+        print('[Uni-Dock] Warning: no poses generated.')
+        return [], None
 
     # Locate output poses
     out_file = os.path.join(result_dir, basename.replace('.pdbqt', '_out.pdbqt'))
