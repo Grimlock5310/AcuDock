@@ -415,8 +415,26 @@ def check_gpu_available():
         return False
 
 
+def setup_unidock_env(prefix='/content/unidock_env'):
+    """Add Uni-Dock environment to PATH and LD_LIBRARY_PATH.
+
+    Must be called before check_unidock_available() or run_unidock().
+    The micromamba env's lib/ directory contains CUDA runtime libraries
+    (libcudart.so, etc.) that the unidock binary needs at runtime.
+    """
+    env_bin = os.path.join(prefix, 'env', 'bin')
+    env_lib = os.path.join(prefix, 'env', 'lib')
+    if os.path.isdir(env_bin):
+        if env_bin not in os.environ.get('PATH', ''):
+            os.environ['PATH'] = env_bin + ':' + os.environ['PATH']
+        if os.path.isdir(env_lib) and env_lib not in os.environ.get('LD_LIBRARY_PATH', ''):
+            os.environ['LD_LIBRARY_PATH'] = env_lib + ':' + os.environ.get('LD_LIBRARY_PATH', '')
+        return True
+    return False
+
+
 def check_unidock_available():
-    """Check if the Uni-Dock binary is on PATH and executable."""
+    """Check if the Uni-Dock binary is on PATH, executable, and can access GPU."""
     try:
         result = subprocess.run(
             ['unidock', '--help'], capture_output=True, text=True, timeout=10
@@ -463,9 +481,8 @@ def install_unidock_colab(prefix='/content/unidock_env'):
             print(f'Uni-Dock install failed: {result.stderr}')
             return False
 
-        # Add to PATH
-        env_bin = os.path.join(env_path, 'bin')
-        os.environ['PATH'] = env_bin + ':' + os.environ.get('PATH', '')
+        # Add to PATH and LD_LIBRARY_PATH
+        setup_unidock_env(prefix)
         return True
     except Exception as e:
         print(f'Uni-Dock install error: {e}')
@@ -522,8 +539,11 @@ def run_unidock(receptor_pdbqt, ligand_pdbqt_files, center, box_size,
     ]
 
     print(f'[Uni-Dock] Command: {" ".join(cmd)}')
+    print(f'[Uni-Dock] LD_LIBRARY_PATH: {os.environ.get("LD_LIBRARY_PATH", "(not set)")[:200]}')
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
 
+    if result.stdout:
+        print(f'[Uni-Dock] stdout: {result.stdout[:500]}')
     if result.stderr:
         print(f'[Uni-Dock] stderr: {result.stderr[:500]}')
     if result.returncode != 0:
@@ -735,11 +755,25 @@ def get_docking_engine_status():
     engines = ['Vina (CPU): Available']
     gpu = check_gpu_available()
     if gpu:
-        engines.append('GPU: Detected (NVIDIA)')
+        try:
+            smi = subprocess.run(
+                ['nvidia-smi', '--query-gpu=name,driver_version,memory.total',
+                 '--format=csv,noheader,nounits'],
+                capture_output=True, text=True, timeout=10
+            )
+            gpu_info = smi.stdout.strip()
+            engines.append(f'GPU: {gpu_info}')
+        except Exception:
+            engines.append('GPU: Detected (NVIDIA)')
     else:
         engines.append('GPU: Not detected')
     if check_unidock_available():
         engines.append('Uni-Dock (GPU): Available')
+        ld = os.environ.get('LD_LIBRARY_PATH', '')
+        if '/content/unidock_env' in ld:
+            engines.append('  LD_LIBRARY_PATH: Set')
+        else:
+            engines.append('  LD_LIBRARY_PATH: WARNING — not set, GPU may not work')
     else:
         engines.append('Uni-Dock (GPU): Not installed')
     return '\n'.join(engines)
