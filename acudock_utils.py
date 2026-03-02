@@ -176,7 +176,7 @@ def run_gnina_rescore(receptor_pdbqt, poses_pdbqt, output_dir='/content/acudock_
     re-evaluate binding poses. CNN scoring improves redocking success
     from ~58% (Vina) to ~73% (Gnina).
 
-    Returns DataFrame with CNN scores, or None if Gnina unavailable.
+    Returns list of score dicts, or None if Gnina unavailable.
     """
     # Check common locations for the gnina binary
     gnina_path = None
@@ -191,11 +191,26 @@ def run_gnina_rescore(receptor_pdbqt, poses_pdbqt, output_dir='/content/acudock_
         print('  !chmod +x /content/gnina')
         return None
 
+    # Convert poses from PDBQT to SDF to avoid Gnina parse errors.
+    # Meeko generates PDBQT with non-standard atom types that Gnina
+    # cannot parse, but SDF is universally compatible.
+    poses_sdf = os.path.join(output_dir, 'poses_for_gnina.sdf')
+    conv = subprocess.run(
+        ['obabel', poses_pdbqt, '-O', poses_sdf],
+        capture_output=True, text=True, timeout=60
+    )
+    if conv.returncode != 0 or not os.path.exists(poses_sdf):
+        print(f'OpenBabel PDBQT->SDF conversion failed: {conv.stderr}')
+        # Fall back to trying PDBQT directly
+        ligand_input = poses_pdbqt
+    else:
+        ligand_input = poses_sdf
+
     output_sdf = os.path.join(output_dir, 'gnina_rescored.sdf')
     cmd = [
         gnina_path,
         '-r', receptor_pdbqt,
-        '-l', poses_pdbqt,
+        '-l', ligand_input,
         '-o', output_sdf,
         '--score_only',
         '--cnn_scoring', 'rescore',
@@ -204,7 +219,7 @@ def run_gnina_rescore(receptor_pdbqt, poses_pdbqt, output_dir='/content/acudock_
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
 
     if result.returncode != 0:
-        print(f'Gnina error: {result.stderr}')
+        print(f'Gnina error: {result.stderr[:500]}')
         return None
 
     # Parse Gnina output
@@ -415,26 +430,8 @@ def check_gpu_available():
         return False
 
 
-def setup_unidock_env(prefix='/content/unidock_env'):
-    """Add Uni-Dock environment to PATH and LD_LIBRARY_PATH.
-
-    Must be called before check_unidock_available() or run_unidock().
-    The micromamba env's lib/ directory contains CUDA runtime libraries
-    (libcudart.so, etc.) that the unidock binary needs at runtime.
-    """
-    env_bin = os.path.join(prefix, 'env', 'bin')
-    env_lib = os.path.join(prefix, 'env', 'lib')
-    if os.path.isdir(env_bin):
-        if env_bin not in os.environ.get('PATH', ''):
-            os.environ['PATH'] = env_bin + ':' + os.environ['PATH']
-        if os.path.isdir(env_lib) and env_lib not in os.environ.get('LD_LIBRARY_PATH', ''):
-            os.environ['LD_LIBRARY_PATH'] = env_lib + ':' + os.environ.get('LD_LIBRARY_PATH', '')
-        return True
-    return False
-
-
 def check_unidock_available():
-    """Check if the Uni-Dock binary is on PATH, executable, and can access GPU."""
+    """Check if the Uni-Dock binary is on PATH and executable."""
     try:
         result = subprocess.run(
             ['unidock', '--help'], capture_output=True, text=True, timeout=10
@@ -444,46 +441,26 @@ def check_unidock_available():
         return False
 
 
-def install_unidock_colab(prefix='/content/unidock_env'):
-    """Install Uni-Dock in Google Colab via micromamba + conda-forge.
+def install_unidock_colab(dest='/usr/local/bin/unidock'):
+    """Install Uni-Dock GPU binary on Google Colab.
 
-    Creates an isolated conda environment at `prefix/env` containing
-    only the unidock binary and its dependencies. This avoids conflicts
-    with Colab's system Python (no condacolab needed).
-
-    After installation, adds the environment's bin dir to PATH so
-    `check_unidock_available()` will find the binary.
+    Downloads the pre-built CUDA 12 binary (10 MB) from the official
+    dptech-corp release. Requires NVIDIA GPU with compute capability >= 7.0.
 
     Returns True on success, False on failure.
     """
+    url = ('https://github.com/dptech-corp/Uni-Dock/releases/download/'
+           '1.1.0/unidock-1.1.0-cuda120-linux-x86_64')
     try:
-        os.makedirs(prefix, exist_ok=True)
-
-        # Download micromamba standalone binary
-        dl_result = subprocess.run(
-            f'wget -qO- https://micro.mamba.pm/api/micromamba/linux-64/latest '
-            f'| tar -xvj -C {prefix}',
-            shell=True, capture_output=True, timeout=120
-        )
-        if dl_result.returncode != 0:
-            print(f'micromamba download failed: {dl_result.stderr.decode()}')
-            return False
-
-        micromamba = os.path.join(prefix, 'bin', 'micromamba')
-        env_path = os.path.join(prefix, 'env')
-
-        # Create isolated environment with unidock
         result = subprocess.run(
-            f'{micromamba} create -y -p {env_path} -c conda-forge unidock',
-            shell=True, capture_output=True, text=True, timeout=600
+            ['wget', '-q', url, '-O', dest],
+            capture_output=True, text=True, timeout=120
         )
         if result.returncode != 0:
-            print(f'Uni-Dock install failed: {result.stderr}')
+            print(f'Uni-Dock download failed: {result.stderr}')
             return False
-
-        # Add to PATH and LD_LIBRARY_PATH
-        setup_unidock_env(prefix)
-        return True
+        os.chmod(dest, 0o755)
+        return check_unidock_available()
     except Exception as e:
         print(f'Uni-Dock install error: {e}')
         return False
@@ -539,7 +516,6 @@ def run_unidock(receptor_pdbqt, ligand_pdbqt_files, center, box_size,
     ]
 
     print(f'[Uni-Dock] Command: {" ".join(cmd)}')
-    print(f'[Uni-Dock] LD_LIBRARY_PATH: {os.environ.get("LD_LIBRARY_PATH", "(not set)")[:200]}')
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
 
     if result.stdout:
@@ -769,11 +745,6 @@ def get_docking_engine_status():
         engines.append('GPU: Not detected')
     if check_unidock_available():
         engines.append('Uni-Dock (GPU): Available')
-        ld = os.environ.get('LD_LIBRARY_PATH', '')
-        if '/content/unidock_env' in ld:
-            engines.append('  LD_LIBRARY_PATH: Set')
-        else:
-            engines.append('  LD_LIBRARY_PATH: WARNING — not set, GPU may not work')
     else:
         engines.append('Uni-Dock (GPU): Not installed')
     return '\n'.join(engines)
