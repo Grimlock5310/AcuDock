@@ -478,9 +478,13 @@ def run_unidock(receptor_pdbqt, ligand_pdbqt_files, center, box_size,
     Uni-Dock achieves >1000x speedup over Vina on GPU by docking many
     ligands in parallel. Uses the same PDBQT format as Vina.
 
+    IMPORTANT: Uni-Dock is designed for batch screening (10+ ligands).
+    For single-ligand docking, use run_vina() instead — Uni-Dock falls
+    back to CPU mode with a single ligand.
+
     Args:
         receptor_pdbqt: Path to receptor PDBQT.
-        ligand_pdbqt_files: List of paths to ligand PDBQT files.
+        ligand_pdbqt_files: List of paths to ligand PDBQT files (10+ recommended).
         center: [x, y, z] center coordinates in Angstroms.
         box_size: [x, y, z] box dimensions in Angstroms.
         exhaustiveness: Search thoroughness (default 32, higher = more thorough).
@@ -495,8 +499,8 @@ def run_unidock(receptor_pdbqt, ligand_pdbqt_files, center, box_size,
     """
     if not check_unidock_available():
         raise RuntimeError(
-            'Uni-Dock not available. Install with: '
-            'conda install -c conda-forge unidock'
+            'Uni-Dock not available. Install the GPU binary from: '
+            'https://github.com/dptech-corp/Uni-Dock/releases'
         )
 
     result_dir = os.path.join(output_dir, 'unidock_results')
