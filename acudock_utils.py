@@ -430,6 +430,11 @@ def check_gpu_available():
         return False
 
 
+def setup_unidock_env(prefix='/content/unidock_env'):
+    """No-op kept for backward compatibility with older notebook versions."""
+    return False
+
+
 def check_unidock_available():
     """Check if the Uni-Dock binary is on PATH and executable."""
     try:
