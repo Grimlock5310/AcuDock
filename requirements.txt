@@ -7,7 +7,6 @@ meeko>=0.5.0
 
 # Cheminformatics
 rdkit
-gemmi
 openbabel-wheel>=3.1.1
 
 # Protein preparation
@@ -19,7 +18,6 @@ prody>=2.4.0
 
 # Visualization
 py3Dmol>=2.0.0
-prolif>=2.0.0
 
 # Data handling
 pandas>=2.0.0
