@@ -689,12 +689,19 @@ def make_3d_viewer_html(protein_pdb_data, ligand_data=None,
 
     js_block = '\n'.join(js_lines)
 
-    return f'''<script src="https://3Dmol.org/build/3Dmol-min.js"></script>
-<div id="{vid}" style="width:{width};height:{height};position:relative;"></div>
-<script>(function(){{{js_block}}})();</script>'''
-
-
-def make_multi_pose_html(protein_pdb_data, poses_pdbqt_data, n_poses=3,
+    # Wrap in an iframe srcdoc because Gradio's gr.HTML() sanitizes
+    # <script> tags. The iframe provides an isolated context where
+    # 3Dmol.js can load and execute.
+    inner_html = (
+        '<!DOCTYPE html><html><head>'
+        '<script src="https://3Dmol.org/build/3Dmol-min.js"></script>'
+        '</head><body style="margin:0;padding:0;">'
+        f'<div id="{vid}" style="width:100%;height:100%;position:relative;"></div>'
+        f'<script>(function(){{{js_block}}})()</script>'
+        '</body></html>'
+    )
+    escaped = inner_html.replace('&', '&amp;').replace('"', '&quot;')
+    return f'<iframe srcdoc="{escaped}" style="width:{width};height:{height};border:none;" sandbox="allow-scripts allow-same-origin"></iframe>'(protein_pdb_data, poses_pdbqt_data, n_poses=3,
                          width='100%', height='500px'):
     """Generate HTML overlaying multiple docked poses on the protein.
 
@@ -730,9 +737,16 @@ def make_multi_pose_html(protein_pdb_data, poses_pdbqt_data, n_poses=3,
     js_lines.append('v.zoomTo({model:1});v.zoom(0.7);v.render();')
     js_block = '\n'.join(js_lines)
 
-    return f'''<script src="https://3Dmol.org/build/3Dmol-min.js"></script>
-<div id="{vid}" style="width:{width};height:{height};position:relative;"></div>
-<script>(function(){{{js_block}}})();</script>'''
+    inner_html = (
+        '<!DOCTYPE html><html><head>'
+        '<script src="https://3Dmol.org/build/3Dmol-min.js"></script>'
+        '</head><body style="margin:0;padding:0;">'
+        f'<div id="{vid}" style="width:100%;height:100%;position:relative;"></div>'
+        f'<script>(function(){{{js_block}}})()</script>'
+        '</body></html>'
+    )
+    escaped = inner_html.replace('&', '&amp;').replace('"', '&quot;')
+    return f'<iframe srcdoc="{escaped}" style="width:{width};height:{height};border:none;" sandbox="allow-scripts allow-same-origin"></iframe>'
 
 
 def get_docking_engine_status():
