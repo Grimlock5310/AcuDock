@@ -136,6 +136,13 @@ class BatchDockingManager:
 
         results = []
 
+        # Build Vina object and compute affinity maps ONCE for the receptor
+        v = Vina(sf_name='vina')
+        v.set_receptor(self.receptor_pdbqt)
+        # Need a dummy ligand to compute maps (Vina requires one)
+        pdbqt_path = os.path.join(self.output_dir, 'tmp_ligand.pdbqt')
+        maps_ready = False
+
         for i, (name, smiles) in enumerate(compounds):
             if smiles in self.docked_smiles:
                 continue
@@ -164,15 +171,14 @@ class BatchDockingManager:
                 mol_setup_list = preparator.prepare(mol)
                 pdbqt_string = meeko.PDBQTWriterLegacy.write_string(mol_setup_list[0])
 
-                pdbqt_path = os.path.join(self.output_dir, f'tmp_ligand.pdbqt')
                 with open(pdbqt_path, 'w') as f:
                     f.write(pdbqt_string[0])
 
-                # Dock
-                v = Vina(sf_name='vina')
-                v.set_receptor(self.receptor_pdbqt)
+                # Dock — compute maps only on first ligand, reuse thereafter
                 v.set_ligand_from_file(pdbqt_path)
-                v.compute_vina_maps(center=self.center, box_size=self.box_size)
+                if not maps_ready:
+                    v.compute_vina_maps(center=self.center, box_size=self.box_size)
+                    maps_ready = True
                 v.dock(exhaustiveness=self.exhaustiveness, n_poses=self.n_poses)
 
                 energies = v.energies()
