@@ -33,6 +33,7 @@
 | 2026-02-27 | Ranking matrix | Scored all 5 approaches across 8 criteria (speed, accuracy, UX, etc.) |
 | 2026-02-27 | Implementation | Built top 3 approaches: QuickDock, AcuDock Pro, AcuDock Scout |
 | 2026-02-28 | Gradio UI + Uni-Dock | Added Gradio interfaces to all 3 notebooks, optional GPU-accelerated docking via Uni-Dock |
+| 2026-03-03 | Bug fixes + review | Fixed SyntaxError in acudock_utils.py, Colab disconnections (demo.launch blocking, missing visualize_poses def, Vina maps recomputation), removed unused gemmi/prolif, guarded os.kill, added Vina validation, fixed CV data leakage, improved Scout demo library, added Pro consensus alpha slider |
 
 ---
 
@@ -191,7 +192,6 @@ openmm>=8.0.0
 
 # Visualization
 py3Dmol>=2.0.0
-prolif>=2.0.0
 
 # Data handling
 pandas>=2.0.0

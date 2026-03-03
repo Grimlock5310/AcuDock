@@ -14,6 +14,7 @@ from rdkit import Chem
 from rdkit.Chem import AllChem, Descriptors
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.model_selection import cross_val_score
+from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
 
@@ -116,8 +117,16 @@ class SurrogateModel:
         self.model.fit(X_scaled, y)
         self.is_fitted = True
 
-        # Cross-validation
-        cv = cross_val_score(self.model, X_scaled, y, cv=min(5, len(y)), scoring='r2')
+        # Cross-validation using Pipeline to avoid data leakage
+        # (scaler must be fit only on each training fold, not all data)
+        cv_pipe = Pipeline([
+            ('scaler', StandardScaler()),
+            ('rf', RandomForestRegressor(
+                n_estimators=self.n_estimators, max_depth=20,
+                min_samples_leaf=5, n_jobs=-1,
+                random_state=self.random_state)),
+        ])
+        cv = cross_val_score(cv_pipe, X, y, cv=min(5, len(y)), scoring='r2')
         self.cv_scores.append(cv.mean())
 
         # Training metrics
