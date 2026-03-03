@@ -701,8 +701,11 @@ def make_3d_viewer_html(protein_pdb_data, ligand_data=None,
         '</body></html>'
     )
     escaped = inner_html.replace('&', '&amp;').replace('"', '&quot;')
-    return f'<iframe srcdoc="{escaped}" style="width:{width};height:{height};border:none;" sandbox="allow-scripts allow-same-origin"></iframe>'(protein_pdb_data, poses_pdbqt_data, n_poses=3,
-                         width='100%', height='500px'):
+    return f'<iframe srcdoc="{escaped}" style="width:{width};height:{height};border:none;" sandbox="allow-scripts allow-same-origin"></iframe>'
+
+
+def visualize_poses(protein_pdb_data, poses_pdbqt_data, n_poses=3,
+                    width='100%', height='500px'):
     """Generate HTML overlaying multiple docked poses on the protein.
 
     Args:
