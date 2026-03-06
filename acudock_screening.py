@@ -224,14 +224,14 @@ class BatchDockingManager:
 
         return batch_df
 
-    def get_all_results(self, sorted=True):
+    def get_all_results(self, sort_results=True):
         """Return all docking results collected so far.
 
         Args:
-            sorted: If True, sort by Best_Score ascending (best first).
+            sort_results: If True, sort by Best_Score ascending (best first).
         """
         df = self.all_results.copy()
-        if sorted and not df.empty:
+        if sort_results and not df.empty:
             df = df.dropna(subset=['Best_Score'])
             df = df.sort_values('Best_Score', ascending=True).reset_index(drop=True)
         return df
@@ -243,7 +243,7 @@ class BatchDockingManager:
             n: Number of top hits to return.
             score_threshold: Optional cutoff (e.g., -7.0 kcal/mol).
         """
-        df = self.get_all_results(sorted=True)
+        df = self.get_all_results(sort_results=True)
         if score_threshold is not None:
             df = df[df['Best_Score'] <= score_threshold]
         return df.head(n)

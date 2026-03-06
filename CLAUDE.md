@@ -193,7 +193,6 @@ openmm>=8.0.0
 
 # Visualization
 py3Dmol>=2.0.0
-prolif>=2.0.0
 
 # Data handling
 pandas>=2.0.0

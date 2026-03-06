@@ -162,6 +162,10 @@ def run_vina(receptor_pdbqt, ligand_pdbqt, center, box_size,
     v.dock(exhaustiveness=exhaustiveness, n_poses=n_poses)
 
     energies = v.energies()
+    if len(energies) == 0:
+        raise RuntimeError(
+            'Vina produced no poses. Check that the search box covers the '
+            'binding site and that the ligand is valid.')
 
     poses_path = receptor_pdbqt.replace('_prepared.pdbqt', '_vina_poses.pdbqt')
     v.write_poses(poses_path, n_poses=n_poses, overwrite=True)
