@@ -18,7 +18,8 @@
 - [x] Phase 3: Build QuickDock notebook (Approach 1)
 - [x] Phase 4: Build AcuDock Pro notebook (Approach 2)
 - [x] Phase 5: Build AcuDock Scout notebook (Approach 5)
-- [x] Phase 5.5: Add Gradio UI + Uni-Dock GPU acceleration to all notebooks
+- [x] Phase 5.5: Add ipywidgets UI + Uni-Dock GPU acceleration to all notebooks
+- [x] Phase 5.6: Replace Gradio with ipywidgets + add multi-protein docking
 - [ ] Phase 6: Testing and validation in Colab
 - [ ] Phase 7: Documentation and examples
 
@@ -33,6 +34,7 @@
 | 2026-02-27 | Ranking matrix | Scored all 5 approaches across 8 criteria (speed, accuracy, UX, etc.) |
 | 2026-02-27 | Implementation | Built top 3 approaches: QuickDock, AcuDock Pro, AcuDock Scout |
 | 2026-02-28 | Gradio UI + Uni-Dock | Added Gradio interfaces to all 3 notebooks, optional GPU-accelerated docking via Uni-Dock |
+| 2026-03-06 | ipywidgets + Multi-Protein | Replaced Gradio with ipywidgets (native Colab, no disconnections), added multi-protein batch docking |
 
 ---
 
@@ -73,7 +75,7 @@
 | Active learning surrogate | Random Forest (primary) | Fast training, interpretable uncertainty, works with Morgan FPs |
 | Interaction analysis | ProLIF | Generates protein-ligand interaction fingerprints for pose comparison |
 | Top 3 build priority | QuickDock, Pro, Scout | Covers beginner -> intermediate -> advanced; diverse architectures |
-| Interactive UI | Gradio | Renders inline in Colab via iframe, share=True auto-enabled, full web app UX |
+| Interactive UI | ipywidgets | Native Jupyter widgets, no server/tunnel (fixes Gradio disconnection), all components supported |
 | GPU docking engine | Uni-Dock (optional) | Apache 2.0, 1000x+ speedup on NVIDIA GPU, same PDBQT format as Vina |
 
 ---
@@ -210,7 +212,7 @@ seaborn>=0.12.0
 prody>=2.4.0
 
 # Interactive UI (all notebooks)
-gradio>=4.0.0
+ipywidgets>=8.0.0
 ```
 
 ---
