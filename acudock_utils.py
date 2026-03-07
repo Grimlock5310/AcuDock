@@ -3,9 +3,9 @@ AcuDock Utilities - Shared helper functions for AcuDock notebooks.
 
 Provides protein preparation, ligand preparation, docking execution
 (Vina + Gnina + Uni-Dock GPU), consensus scoring, visualization,
-and Gradio-compatible 3D viewer generation.
+and interactive 3D viewer generation via 3Dmol.js.
 
-Designed for use in Google Colab with Gradio interfaces.
+Designed for use in Google Colab with ipywidgets interfaces.
 """
 
 import os
@@ -634,7 +634,7 @@ def extract_pose_from_pdbqt(poses_pdbqt_path, pose_index=0):
 
 
 # ---------------------------------------------------------------------------
-# 3D Viewer HTML (for Gradio)
+# 3D Viewer HTML
 # ---------------------------------------------------------------------------
 
 def make_3d_viewer_html(protein_pdb_data, ligand_data=None,
@@ -644,7 +644,8 @@ def make_3d_viewer_html(protein_pdb_data, ligand_data=None,
 
     Uses the 3Dmol.js library loaded from CDN. Data is base64-encoded
     to avoid escaping issues. Returns a self-contained HTML snippet
-    suitable for Gradio's gr.HTML() component.
+    wrapped in an iframe for use with IPython.display.HTML() or
+    ipywidgets.HTML().
 
     Args:
         protein_pdb_data: Protein PDB file contents as string.
@@ -693,9 +694,9 @@ def make_3d_viewer_html(protein_pdb_data, ligand_data=None,
 
     js_block = '\n'.join(js_lines)
 
-    # Wrap in an iframe srcdoc because Gradio's gr.HTML() sanitizes
-    # <script> tags. The iframe provides an isolated context where
-    # 3Dmol.js can load and execute.
+    # Wrap in an iframe srcdoc so 3Dmol.js scripts execute in an
+    # isolated context. Works with IPython.display.HTML() and
+    # ipywidgets.HTML().
     inner_html = (
         '<!DOCTYPE html><html><head>'
         '<script src="https://3Dmol.org/build/3Dmol-min.js"></script>'
@@ -778,3 +779,121 @@ def get_docking_engine_status():
     else:
         engines.append('Uni-Dock (GPU): Not installed')
     return '\n'.join(engines)
+
+
+# ---------------------------------------------------------------------------
+# Multi-Protein Docking (1 ligand x N proteins)
+# ---------------------------------------------------------------------------
+
+def dock_multi_protein(smiles, pdb_ids, name='ligand',
+                       residues_map=None, box_size=20,
+                       exhaustiveness=32, n_poses=5,
+                       output_dir='/content/acudock_multi',
+                       progress_callback=None):
+    """Dock one ligand against multiple protein targets.
+
+    Prepares the ligand once and docks it against each protein
+    sequentially. Each protein is fetched, prepared, and docked
+    independently.
+
+    Args:
+        smiles: SMILES string for the ligand.
+        pdb_ids: List of PDB ID strings.
+        name: Ligand name for labeling.
+        residues_map: Optional dict {pdb_id: [residue_ints]} for
+            per-protein active site definition. If None or missing
+            for a given PDB ID, uses whole-protein centroid.
+        box_size: Search box size in Angstroms (applied uniformly).
+        exhaustiveness: Vina exhaustiveness.
+        n_poses: Number of poses per protein.
+        output_dir: Working directory.
+        progress_callback: Optional callable(current, total, pdb_id, status_msg).
+
+    Returns:
+        (results_df, best_pdb_id, best_protein_pdb, best_poses_path)
+
+        results_df columns: PDB_ID, Best_Score, Est_Kd_uM, Interpretation,
+                            Num_Poses, Center, Prep_Time_s, Dock_Time_s, Error
+        best_pdb_id: PDB ID with the best (most negative) score.
+        best_protein_pdb: Path to the prepared PDB of the best target.
+        best_poses_path: Path to the Vina poses PDBQT of the best target.
+    """
+    import time
+
+    os.makedirs(output_dir, exist_ok=True)
+    if residues_map is None:
+        residues_map = {}
+    box = [int(box_size)] * 3
+    R, T = 1.987e-3, 298.15
+
+    # Prepare ligand once
+    ligand_pdbqt, _ = prepare_ligand(smiles, name=name, output_dir=output_dir)
+
+    results = []
+    best_score = float('inf')
+    best_pdb_id = None
+    best_protein_pdb = None
+    best_poses_path = None
+
+    for i, pdb_id in enumerate(pdb_ids):
+        pdb_id = pdb_id.strip().upper()
+        if not pdb_id:
+            continue
+
+        if progress_callback:
+            progress_callback(i, len(pdb_ids), pdb_id, 'Preparing protein...')
+
+        row = {'PDB_ID': pdb_id, 'Best_Score': None, 'Est_Kd_uM': None,
+               'Interpretation': 'Failed', 'Num_Poses': 0,
+               'Center': '', 'Prep_Time_s': 0, 'Dock_Time_s': 0, 'Error': ''}
+
+        try:
+            # Prepare protein
+            t0 = time.time()
+            pdb_dir = os.path.join(output_dir, pdb_id)
+            protein_pdb = prepare_protein(pdb_id, output_dir=pdb_dir)
+            receptor_pdbqt = pdb_to_pdbqt(protein_pdb)
+            row['Prep_Time_s'] = round(time.time() - t0, 1)
+
+            # Binding site center
+            residues = residues_map.get(pdb_id)
+            center = get_binding_site_center(protein_pdb, chain='A',
+                                             residues=residues)
+            row['Center'] = f'[{center[0]:.1f}, {center[1]:.1f}, {center[2]:.1f}]'
+
+            # Dock
+            if progress_callback:
+                progress_callback(i, len(pdb_ids), pdb_id, 'Docking...')
+
+            t1 = time.time()
+            _, energies, poses_path = run_vina(
+                receptor_pdbqt, ligand_pdbqt,
+                center=center, box_size=box,
+                exhaustiveness=int(exhaustiveness), n_poses=int(n_poses)
+            )
+            row['Dock_Time_s'] = round(time.time() - t1, 1)
+
+            if energies and len(energies) > 0:
+                score = energies[0][0]
+                row['Best_Score'] = round(score, 2)
+                row['Est_Kd_uM'] = round(np.exp(score / (R * T)) * 1e6, 4)
+                row['Interpretation'] = score_interpretation(score)
+                row['Num_Poses'] = len(energies)
+
+                if score < best_score:
+                    best_score = score
+                    best_pdb_id = pdb_id
+                    best_protein_pdb = protein_pdb
+                    best_poses_path = poses_path
+
+        except Exception as e:
+            row['Error'] = str(e)
+
+        results.append(row)
+
+    results_df = pd.DataFrame(results)
+    if not results_df.empty:
+        results_df = results_df.sort_values('Best_Score', ascending=True,
+                                            na_position='last').reset_index(drop=True)
+
+    return results_df, best_pdb_id, best_protein_pdb, best_poses_path
