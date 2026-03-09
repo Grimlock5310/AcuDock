@@ -894,7 +894,7 @@ def dock_multi_protein(smiles, pdb_ids, name='ligand',
             )
             row['Dock_Time_s'] = round(time.time() - t1, 1)
 
-            if energies and len(energies) > 0:
+            if len(energies) > 0:
                 score = energies[0][0]
                 row['Best_Score'] = round(score, 2)
                 row['Est_Kd_uM'] = round(np.exp(score / (R * T)) * 1e6, 4)
