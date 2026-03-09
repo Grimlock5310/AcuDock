@@ -319,6 +319,27 @@ def get_binding_site_center(pdb_path, chain='A', residues=None):
 # Visualization
 # ---------------------------------------------------------------------------
 
+def _clean_pdbqt_for_viewer(pdbqt_data):
+    """Convert PDBQT string to PDB-compatible string for py3Dmol.
+
+    PDBQT files contain extra columns (partial charges, AutoDock atom
+    types) and keywords (ROOT, BRANCH, ENDBRANCH, TORSDOF) that
+    py3Dmol's PDB parser cannot handle for many molecules. This
+    strips those extras so the data parses as valid PDB.
+    """
+    lines = []
+    for line in pdbqt_data.split('\n'):
+        # Skip PDBQT-specific directives
+        if line.startswith(('ROOT', 'ENDROOT', 'BRANCH', 'ENDBRANCH', 'TORSDOF')):
+            continue
+        # Trim ATOM/HETATM to 66 chars (PDB standard) to drop charge + type cols
+        if line.startswith(('ATOM', 'HETATM')):
+            lines.append(line[:66])
+        else:
+            lines.append(line)
+    return '\n'.join(lines)
+
+
 def visualize_pose(protein_pdb, poses_pdbqt, pose_index=0,
                    width=800, height=600):
     """Create a py3Dmol view of a docked pose in the protein.
@@ -343,7 +364,7 @@ def visualize_pose(protein_pdb, poses_pdbqt, pose_index=0,
     view.addModel(protein_data, 'pdb')
     view.setStyle({'model': 0}, {'cartoon': {'color': 'spectrum', 'opacity': 0.8}})
 
-    view.addModel(pose_data, 'pdb')
+    view.addModel(_clean_pdbqt_for_viewer(pose_data), 'pdb')
     view.setStyle({'model': 1}, {'stick': {'colorscheme': 'greenCarbon', 'radius': 0.2}})
     view.addSurface(py3Dmol.VDW, {'opacity': 0.25, 'color': 'green'}, {'model': 1})
 
@@ -373,7 +394,7 @@ def visualize_multi_poses(protein_pdb, poses_pdbqt, n_poses=3,
     models = poses_data.split('MODEL')
     for i in range(min(n_poses, len(models) - 1)):
         pose = 'MODEL' + models[i + 1].split('ENDMDL')[0] + 'ENDMDL'
-        view.addModel(pose, 'pdb')
+        view.addModel(_clean_pdbqt_for_viewer(pose), 'pdb')
         view.setStyle({'model': i + 1}, {'stick': {'color': colors[i % len(colors)], 'radius': 0.15}})
 
     view.zoomTo({'model': 1})
