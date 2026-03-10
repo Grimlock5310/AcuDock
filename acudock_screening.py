@@ -26,7 +26,8 @@ class BatchDockingManager:
 
     def __init__(self, receptor_pdbqt, center, box_size,
                  exhaustiveness=8, n_poses=5,
-                 output_dir='/content/acudock_scout'):
+                 output_dir='/content/acudock_scout',
+                 use_unidock=False):
         """Initialize the batch docking manager.
 
         Args:
@@ -36,6 +37,8 @@ class BatchDockingManager:
             exhaustiveness: Vina exhaustiveness (8=fast screening, 32=thorough).
             n_poses: Number of poses per ligand.
             output_dir: Directory for output files.
+            use_unidock: If True, use Uni-Dock GPU for batch docking.
+                Falls back to Vina if Uni-Dock is unavailable or fails.
         """
         self.receptor_pdbqt = receptor_pdbqt
         self.center = center
@@ -43,6 +46,7 @@ class BatchDockingManager:
         self.exhaustiveness = exhaustiveness
         self.n_poses = n_poses
         self.output_dir = output_dir
+        self.use_unidock = use_unidock
 
         os.makedirs(output_dir, exist_ok=True)
 
@@ -122,8 +126,57 @@ class BatchDockingManager:
         n = min(n, len(available))
         return random.sample(available, n)
 
+    def _prepare_ligand_pdbqt(self, smiles, output_path):
+        """Prepare a single ligand SMILES into a PDBQT file.
+
+        Returns the output_path on success, None on failure.
+        """
+        import meeko
+
+        mol = Chem.MolFromSmiles(smiles)
+        if mol is None:
+            return None
+
+        mol = Chem.AddHs(mol)
+        params = AllChem.ETKDGv3()
+        params.randomSeed = 42
+        status = AllChem.EmbedMolecule(mol, params)
+        if status != 0:
+            AllChem.EmbedMolecule(mol, AllChem.ETKDG())
+
+        try:
+            AllChem.MMFFOptimizeMolecule(mol, maxIters=1000)
+        except Exception:
+            AllChem.UFFOptimizeMolecule(mol, maxIters=1000)
+
+        preparator = meeko.MoleculePreparation()
+        mol_setup_list = preparator.prepare(mol)
+        pdbqt_string = meeko.PDBQTWriterLegacy.write_string(mol_setup_list[0])
+
+        with open(output_path, 'w') as f:
+            f.write(pdbqt_string[0])
+
+        return output_path
+
+    def _mol_descriptors(self, smiles):
+        """Compute molecular descriptors for a SMILES string."""
+        mol = Chem.MolFromSmiles(smiles)
+        if mol is None:
+            return {}
+        return {
+            'MW': Descriptors.MolWt(mol),
+            'LogP': Descriptors.MolLogP(mol),
+            'HBD': Descriptors.NumHDonors(mol),
+            'HBA': Descriptors.NumHAcceptors(mol),
+        }
+
     def dock_batch(self, compounds, progress_callback=None):
         """Dock a batch of (name, SMILES) compounds.
+
+        If use_unidock is True, prepares all ligands first and submits
+        them as a single Uni-Dock GPU batch call (this is where the
+        1000x+ speedup comes from). Falls back to sequential Vina if
+        Uni-Dock is unavailable or fails.
 
         Args:
             compounds: List of (name, SMILES) tuples.
@@ -131,15 +184,116 @@ class BatchDockingManager:
 
         Returns DataFrame with columns [Name, SMILES, Best_Score, MW, LogP, ...].
         """
-        import meeko
+        # Filter already-docked compounds
+        todo = [(name, smi) for name, smi in compounds
+                if smi not in self.docked_smiles]
+
+        if not todo:
+            return pd.DataFrame()
+
+        if self.use_unidock:
+            return self._dock_batch_unidock(todo, progress_callback)
+        return self._dock_batch_vina(todo, progress_callback)
+
+    def _dock_batch_unidock(self, compounds, progress_callback=None):
+        """Dock a batch using Uni-Dock GPU (all ligands in one call).
+
+        Prepares all ligand PDBQTs first, then submits them as a single
+        Uni-Dock batch. Falls back to Vina on any failure.
+        """
+        from acudock_utils import run_unidock, parse_pdbqt_scores
+
+        # Step 1: Prepare all ligand PDBQTs
+        lig_dir = os.path.join(self.output_dir, 'unidock_ligands')
+        os.makedirs(lig_dir, exist_ok=True)
+
+        prepared = []  # (name, smiles, pdbqt_path)
+        for i, (name, smiles) in enumerate(compounds):
+            if progress_callback:
+                progress_callback(i + 1, len(compounds), name, 'preparing...')
+            try:
+                safe_name = name.replace('/', '_').replace(' ', '_')[:50]
+                pdbqt_path = os.path.join(lig_dir, f'{safe_name}_{i}.pdbqt')
+                result = self._prepare_ligand_pdbqt(smiles, pdbqt_path)
+                if result:
+                    prepared.append((name, smiles, pdbqt_path))
+            except Exception:
+                pass
+
+        if not prepared:
+            return pd.DataFrame()
+
+        # Step 2: Run Uni-Dock batch
+        pdbqt_files = [p for _, _, p in prepared]
+        t0 = time.time()
+        try:
+            unidock_results = run_unidock(
+                self.receptor_pdbqt, pdbqt_files,
+                center=self.center, box_size=self.box_size,
+                exhaustiveness=self.exhaustiveness,
+                num_modes=self.n_poses,
+                output_dir=self.output_dir
+            )
+        except Exception as e:
+            # Uni-Dock failed entirely — fall back to Vina
+            if progress_callback:
+                progress_callback(0, len(compounds), '',
+                                  f'Uni-Dock failed ({e}), falling back to Vina...')
+            return self._dock_batch_vina(compounds, progress_callback)
+
+        batch_time = time.time() - t0
+
+        # Step 3: Parse results
+        results = []
+        per_mol_time = batch_time / max(1, len(prepared))
+
+        for idx, (name, smiles, pdbqt_path) in enumerate(prepared):
+            basename = os.path.basename(pdbqt_path)
+            scores = unidock_results.get(basename, [])
+
+            if scores and scores[0][0] <= 0:
+                best_score = scores[0][0]
+                desc = self._mol_descriptors(smiles)
+                results.append({
+                    'Name': name, 'SMILES': smiles,
+                    'Best_Score': best_score,
+                    'MW': desc.get('MW'), 'LogP': desc.get('LogP'),
+                    'HBD': desc.get('HBD'), 'HBA': desc.get('HBA'),
+                    'Num_Poses': len(scores),
+                    'Dock_Time_s': round(per_mol_time, 2),
+                })
+                self.docked_smiles.add(smiles)
+                self.total_docked += 1
+                self.total_dock_time += per_mol_time
+            else:
+                results.append({
+                    'Name': name, 'SMILES': smiles,
+                    'Best_Score': None, 'MW': None, 'LogP': None,
+                    'HBD': None, 'HBA': None,
+                    'Num_Poses': 0, 'Dock_Time_s': round(per_mol_time, 2),
+                })
+
+            if progress_callback:
+                score_str = f'{results[-1]["Best_Score"]:.2f}' if results[-1]['Best_Score'] else 'failed'
+                progress_callback(idx + 1, len(prepared), name, score_str)
+
+        batch_df = pd.DataFrame(results)
+        self.all_results = pd.concat(
+            [self.all_results, batch_df], ignore_index=True
+        )
+        return batch_df
+
+    def _dock_batch_vina(self, compounds, progress_callback=None):
+        """Dock a batch sequentially using Vina CPU.
+
+        Computes Vina affinity maps once and reuses them for all ligands.
+        """
         from vina import Vina
 
         results = []
 
-        # Build Vina object and compute affinity maps ONCE for the receptor
         v = Vina(sf_name='vina')
         v.set_receptor(self.receptor_pdbqt)
-        # Need a dummy ligand to compute maps (Vina requires one)
         pdbqt_path = os.path.join(self.output_dir, 'tmp_ligand.pdbqt')
         maps_ready = False
 
@@ -149,32 +303,10 @@ class BatchDockingManager:
 
             t0 = time.time()
             try:
-                # Prepare ligand
-                mol = Chem.MolFromSmiles(smiles)
-                if mol is None:
+                result_path = self._prepare_ligand_pdbqt(smiles, pdbqt_path)
+                if result_path is None:
                     continue
 
-                mol = Chem.AddHs(mol)
-                params = AllChem.ETKDGv3()
-                params.randomSeed = 42
-                status = AllChem.EmbedMolecule(mol, params)
-                if status != 0:
-                    AllChem.EmbedMolecule(mol, AllChem.ETKDG())
-
-                try:
-                    AllChem.MMFFOptimizeMolecule(mol, maxIters=1000)
-                except Exception:
-                    AllChem.UFFOptimizeMolecule(mol, maxIters=1000)
-
-                # Convert to PDBQT
-                preparator = meeko.MoleculePreparation()
-                mol_setup_list = preparator.prepare(mol)
-                pdbqt_string = meeko.PDBQTWriterLegacy.write_string(mol_setup_list[0])
-
-                with open(pdbqt_path, 'w') as f:
-                    f.write(pdbqt_string[0])
-
-                # Dock — compute maps only on first ligand, reuse thereafter
                 v.set_ligand_from_file(pdbqt_path)
                 if not maps_ready:
                     v.compute_vina_maps(center=self.center, box_size=self.box_size)
@@ -183,16 +315,13 @@ class BatchDockingManager:
 
                 energies = v.energies()
                 best_score = energies[0][0]
+                desc = self._mol_descriptors(smiles)
 
-                mol_2d = Chem.MolFromSmiles(smiles)
                 result = {
-                    'Name': name,
-                    'SMILES': smiles,
+                    'Name': name, 'SMILES': smiles,
                     'Best_Score': best_score,
-                    'MW': Descriptors.MolWt(mol_2d),
-                    'LogP': Descriptors.MolLogP(mol_2d),
-                    'HBD': Descriptors.NumHDonors(mol_2d),
-                    'HBA': Descriptors.NumHAcceptors(mol_2d),
+                    'MW': desc.get('MW'), 'LogP': desc.get('LogP'),
+                    'HBD': desc.get('HBD'), 'HBA': desc.get('HBA'),
                     'Num_Poses': len(energies),
                     'Dock_Time_s': round(time.time() - t0, 2),
                 }
@@ -206,13 +335,9 @@ class BatchDockingManager:
 
             except Exception as e:
                 results.append({
-                    'Name': name,
-                    'SMILES': smiles,
-                    'Best_Score': None,
-                    'MW': None,
-                    'LogP': None,
-                    'HBD': None,
-                    'HBA': None,
+                    'Name': name, 'SMILES': smiles,
+                    'Best_Score': None, 'MW': None, 'LogP': None,
+                    'HBD': None, 'HBA': None,
                     'Num_Poses': 0,
                     'Dock_Time_s': round(time.time() - t0, 2),
                 })
