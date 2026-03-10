@@ -806,16 +806,100 @@ def get_docking_engine_status():
 # Multi-Protein Docking (1 ligand x N proteins)
 # ---------------------------------------------------------------------------
 
+def _dock_single_protein(args):
+    """Worker function for parallel multi-protein docking.
+
+    Designed to be called via concurrent.futures. Prepares one protein
+    and docks the pre-prepared ligand against it.
+
+    Args:
+        args: Tuple of (pdb_id, ligand_pdbqt, residues, box, exhaustiveness,
+              n_poses, output_dir, use_unidock).
+
+    Returns:
+        dict with docking results for this protein.
+    """
+    import time
+
+    pdb_id, ligand_pdbqt, residues, box, exhaustiveness, n_poses, output_dir, use_unidock = args
+    R, T = 1.987e-3, 298.15
+
+    row = {'PDB_ID': pdb_id, 'Best_Score': None, 'Est_Kd_uM': None,
+           'Interpretation': 'Failed', 'Num_Poses': 0,
+           'Center': '', 'Prep_Time_s': 0, 'Dock_Time_s': 0,
+           'Engine': 'Vina', 'Error': ''}
+
+    try:
+        # Prepare protein
+        t0 = time.time()
+        pdb_dir = os.path.join(output_dir, pdb_id)
+        protein_pdb = prepare_protein(pdb_id, output_dir=pdb_dir)
+        receptor_pdbqt = pdb_to_pdbqt(protein_pdb)
+        row['Prep_Time_s'] = round(time.time() - t0, 1)
+
+        # Binding site center
+        center = get_binding_site_center(protein_pdb, chain='A',
+                                         residues=residues)
+        row['Center'] = f'[{center[0]:.1f}, {center[1]:.1f}, {center[2]:.1f}]'
+
+        # Dock — try Uni-Dock first if requested, fall back to Vina
+        t1 = time.time()
+        energies = []
+        poses_path = None
+
+        if use_unidock:
+            try:
+                energies, poses_path = run_unidock_single(
+                    receptor_pdbqt, ligand_pdbqt,
+                    center=center, box_size=box,
+                    exhaustiveness=int(exhaustiveness),
+                    num_modes=int(n_poses),
+                    output_dir=pdb_dir
+                )
+                if energies:
+                    row['Engine'] = 'Uni-Dock'
+            except Exception:
+                energies = []
+                poses_path = None
+
+        if not energies:
+            _, energies, poses_path = run_vina(
+                receptor_pdbqt, ligand_pdbqt,
+                center=center, box_size=box,
+                exhaustiveness=int(exhaustiveness), n_poses=int(n_poses)
+            )
+            row['Engine'] = 'Vina (fallback)' if use_unidock else 'Vina'
+
+        row['Dock_Time_s'] = round(time.time() - t1, 1)
+
+        if len(energies) > 0:
+            score = energies[0][0]
+            row['Best_Score'] = round(score, 2)
+            row['Est_Kd_uM'] = round(np.exp(score / (R * T)) * 1e6, 4)
+            row['Interpretation'] = score_interpretation(score)
+            row['Num_Poses'] = len(energies)
+
+        row['_protein_pdb'] = protein_pdb
+        row['_poses_path'] = poses_path
+
+    except Exception as e:
+        row['Error'] = str(e)
+
+    return row
+
+
 def dock_multi_protein(smiles, pdb_ids, name='ligand',
                        residues_map=None, box_size=20,
                        exhaustiveness=32, n_poses=5,
                        output_dir='/content/acudock_multi',
-                       progress_callback=None):
-    """Dock one ligand against multiple protein targets.
+                       progress_callback=None,
+                       use_unidock=False, max_workers=3):
+    """Dock one ligand against multiple protein targets in parallel.
 
-    Prepares the ligand once and docks it against each protein
-    sequentially. Each protein is fetched, prepared, and docked
-    independently.
+    Prepares the ligand once and docks it against each protein using
+    concurrent workers. Each protein is fetched, prepared, and docked
+    independently. Optionally uses Uni-Dock GPU acceleration per target
+    with automatic Vina fallback.
 
     Args:
         smiles: SMILES string for the ligand.
@@ -829,26 +913,53 @@ def dock_multi_protein(smiles, pdb_ids, name='ligand',
         n_poses: Number of poses per protein.
         output_dir: Working directory.
         progress_callback: Optional callable(current, total, pdb_id, status_msg).
+        use_unidock: If True, attempt Uni-Dock GPU for each target
+            (falls back to Vina on failure).
+        max_workers: Max parallel protein preparations/docks (default 3).
+            Capped to avoid Colab memory issues.
 
     Returns:
         (results_df, best_pdb_id, best_protein_pdb, best_poses_path)
 
         results_df columns: PDB_ID, Best_Score, Est_Kd_uM, Interpretation,
-                            Num_Poses, Center, Prep_Time_s, Dock_Time_s, Error
+                            Num_Poses, Center, Prep_Time_s, Dock_Time_s,
+                            Engine, Error
         best_pdb_id: PDB ID with the best (most negative) score.
         best_protein_pdb: Path to the prepared PDB of the best target.
         best_poses_path: Path to the Vina poses PDBQT of the best target.
     """
     import time
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
     os.makedirs(output_dir, exist_ok=True)
     if residues_map is None:
         residues_map = {}
     box = [int(box_size)] * 3
-    R, T = 1.987e-3, 298.15
+
+    # If Uni-Dock requested, verify it's available
+    if use_unidock and not check_unidock_available():
+        if progress_callback:
+            progress_callback(0, len(pdb_ids), '',
+                              'Uni-Dock not found, using Vina for all targets.')
+        use_unidock = False
 
     # Prepare ligand once
     ligand_pdbqt, _ = prepare_ligand(smiles, name=name, output_dir=output_dir)
+
+    # Build work items
+    clean_ids = []
+    work_args = []
+    for pdb_id in pdb_ids:
+        pdb_id = pdb_id.strip().upper()
+        if not pdb_id:
+            continue
+        clean_ids.append(pdb_id)
+        residues = residues_map.get(pdb_id)
+        work_args.append((pdb_id, ligand_pdbqt, residues, box,
+                          exhaustiveness, n_poses, output_dir, use_unidock))
+
+    # Cap workers to avoid memory issues on Colab
+    n_workers = min(max(1, int(max_workers)), len(clean_ids), 4)
 
     results = []
     best_score = float('inf')
@@ -856,61 +967,73 @@ def dock_multi_protein(smiles, pdb_ids, name='ligand',
     best_protein_pdb = None
     best_poses_path = None
 
-    for i, pdb_id in enumerate(pdb_ids):
-        pdb_id = pdb_id.strip().upper()
-        if not pdb_id:
-            continue
-
-        if progress_callback:
-            progress_callback(i, len(pdb_ids), pdb_id, 'Preparing protein...')
-
-        row = {'PDB_ID': pdb_id, 'Best_Score': None, 'Est_Kd_uM': None,
-               'Interpretation': 'Failed', 'Num_Poses': 0,
-               'Center': '', 'Prep_Time_s': 0, 'Dock_Time_s': 0, 'Error': ''}
-
-        try:
-            # Prepare protein
-            t0 = time.time()
-            pdb_dir = os.path.join(output_dir, pdb_id)
-            protein_pdb = prepare_protein(pdb_id, output_dir=pdb_dir)
-            receptor_pdbqt = pdb_to_pdbqt(protein_pdb)
-            row['Prep_Time_s'] = round(time.time() - t0, 1)
-
-            # Binding site center
-            residues = residues_map.get(pdb_id)
-            center = get_binding_site_center(protein_pdb, chain='A',
-                                             residues=residues)
-            row['Center'] = f'[{center[0]:.1f}, {center[1]:.1f}, {center[2]:.1f}]'
-
-            # Dock
+    if n_workers <= 1 or len(clean_ids) <= 1:
+        # Sequential fallback for single protein or explicit single-worker
+        for i, args in enumerate(work_args):
+            pdb_id = args[0]
             if progress_callback:
-                progress_callback(i, len(pdb_ids), pdb_id, 'Docking...')
+                progress_callback(i, len(clean_ids), pdb_id,
+                                  'Preparing & docking...')
+            row = _dock_single_protein(args)
 
-            t1 = time.time()
-            _, energies, poses_path = run_vina(
-                receptor_pdbqt, ligand_pdbqt,
-                center=center, box_size=box,
-                exhaustiveness=int(exhaustiveness), n_poses=int(n_poses)
-            )
-            row['Dock_Time_s'] = round(time.time() - t1, 1)
+            protein_pdb = row.pop('_protein_pdb', None)
+            poses_path = row.pop('_poses_path', None)
 
-            if len(energies) > 0:
-                score = energies[0][0]
-                row['Best_Score'] = round(score, 2)
-                row['Est_Kd_uM'] = round(np.exp(score / (R * T)) * 1e6, 4)
-                row['Interpretation'] = score_interpretation(score)
-                row['Num_Poses'] = len(energies)
+            if row.get('Best_Score') is not None and row['Best_Score'] < best_score:
+                best_score = row['Best_Score']
+                best_pdb_id = pdb_id
+                best_protein_pdb = protein_pdb
+                best_poses_path = poses_path
 
-                if score < best_score:
-                    best_score = score
+            results.append(row)
+            if progress_callback:
+                status = (f"Done ({row['Best_Score']} kcal/mol)"
+                          if row['Best_Score'] is not None
+                          else f"Failed: {row['Error']}")
+                progress_callback(i, len(clean_ids), pdb_id, status)
+    else:
+        # Parallel execution
+        if progress_callback:
+            progress_callback(0, len(clean_ids), '',
+                              f'Parallel docking with {n_workers} workers...')
+
+        future_to_pdb = {}
+        with ThreadPoolExecutor(max_workers=n_workers) as executor:
+            for args in work_args:
+                future = executor.submit(_dock_single_protein, args)
+                future_to_pdb[future] = args[0]
+
+            completed = 0
+            for future in as_completed(future_to_pdb):
+                pdb_id = future_to_pdb[future]
+                completed += 1
+
+                try:
+                    row = future.result()
+                except Exception as e:
+                    row = {'PDB_ID': pdb_id, 'Best_Score': None,
+                           'Est_Kd_uM': None, 'Interpretation': 'Failed',
+                           'Num_Poses': 0, 'Center': '', 'Prep_Time_s': 0,
+                           'Dock_Time_s': 0, 'Engine': '', 'Error': str(e)}
+
+                protein_pdb = row.pop('_protein_pdb', None)
+                poses_path = row.pop('_poses_path', None)
+
+                if (row.get('Best_Score') is not None
+                        and row['Best_Score'] < best_score):
+                    best_score = row['Best_Score']
                     best_pdb_id = pdb_id
                     best_protein_pdb = protein_pdb
                     best_poses_path = poses_path
 
-        except Exception as e:
-            row['Error'] = str(e)
+                results.append(row)
 
-        results.append(row)
+                if progress_callback:
+                    status = (f"Done ({row['Best_Score']} kcal/mol)"
+                              if row['Best_Score'] is not None
+                              else f"Failed: {row['Error']}")
+                    progress_callback(completed - 1, len(clean_ids),
+                                      pdb_id, status)
 
     results_df = pd.DataFrame(results)
     if not results_df.empty:
