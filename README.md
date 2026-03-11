@@ -4,7 +4,7 @@ AcuDock is a collection of Google Colab notebooks that predict how drug-like mol
 
 **No installation required.** Everything runs in your web browser through Google Colab (free).
 
-**Interactive Gradio UI** -- no code editing needed. Each notebook launches a web interface where you fill in forms and click buttons. Optional **GPU-accelerated docking** via Uni-Dock for 1000x+ speedup.
+**Interactive widget interface** -- no code editing needed. Each notebook provides built-in controls (sliders, dropdowns, text fields) where you fill in values and click buttons. The code is hidden by default so you can focus on the science. Optional **GPU-accelerated docking** via Uni-Dock for 1000x+ speedup on large screening runs.
 
 ---
 
@@ -13,9 +13,9 @@ AcuDock is a collection of Google Colab notebooks that predict how drug-like mol
 1. [What Is Molecular Docking?](#what-is-molecular-docking)
 2. [Before You Start](#before-you-start)
 3. [Which Notebook Should I Use?](#which-notebook-should-i-use)
-4. [QuickDock - Getting Started (Beginners)](#quickdock---getting-started-beginners)
-5. [AcuDock Pro - Interactive Mode (Intermediate)](#acudock-pro---interactive-mode-intermediate)
-6. [AcuDock Scout - Large-Scale Screening (Advanced)](#acudock-scout---large-scale-screening-advanced)
+4. [QuickDock - Getting Started](#quickdock---getting-started)
+5. [AcuDock Pro - Full-Featured Docking](#acudock-pro---full-featured-docking)
+6. [AcuDock Scout - Large-Scale Screening](#acudock-scout---large-scale-screening)
 7. [Key Concepts Explained](#key-concepts-explained)
 8. [How to Find Your Protein Target](#how-to-find-your-protein-target)
 9. [How to Get Molecule SMILES](#how-to-get-molecule-smiles)
@@ -54,7 +54,7 @@ Imagine you have a lock (a protein involved in a disease) and you want to find t
 ### What You Do NOT Need
 
 - Any software installation
-- Programming experience (especially for AcuDock Pro)
+- Programming experience -- all three notebooks are controlled entirely through interactive widgets
 - A powerful computer (everything runs on Google's servers)
 - A paid account (the free tier of Colab is sufficient)
 
@@ -63,9 +63,10 @@ Imagine you have a lock (a protein involved in a disease) and you want to find t
 1. Go to [Google Colab](https://colab.research.google.com/)
 2. Click **File > Open notebook > GitHub**
 3. Paste this repository's URL and select `AcuDock_QuickDock.ipynb`
-4. Run the **first cell** (install) — the runtime will restart automatically
-5. After restart, **skip the install cell** and run the remaining cells
-6. A **Gradio interface** will appear inline — fill in PDB ID and SMILES, click "Run Docking"
+4. Click **Runtime > Run all** to run every cell at once
+5. The first cell installs dependencies and the runtime will **automatically restart** -- this is normal
+6. After restart, click **Runtime > Run all** again (the install cell will detect packages are already present and skip itself)
+7. An interactive widget panel will appear -- fill in your PDB ID and SMILES, then click "Run Docking"
 
 ---
 
@@ -74,223 +75,171 @@ Imagine you have a lock (a protein involved in a disease) and you want to find t
 | If you want to... | Use this notebook | Difficulty | Time |
 |---|---|---|---|
 | Try docking for the first time | **QuickDock** | Beginner | ~10 min |
-| Dock without editing any code | **AcuDock Pro** | Intermediate | ~10 min |
-| Test a handful of molecules (<50) | **QuickDock** or **Pro** | Beginner | ~15 min |
-| Screen a large library (100+) | **AcuDock Scout** | Advanced | ~30-60 min |
-| Get the most accurate results | **AcuDock Pro** (with Gnina CNN) | Intermediate | ~15 min |
-| Learn how docking works | **QuickDock** | Beginner | ~10 min |
+| Dock one molecule against one protein | **QuickDock** or **Pro** | Beginner | ~10 min |
+| Test a handful of molecules (<50) | **QuickDock** or **Pro** (Batch tab) | Beginner | ~15 min |
+| Get the most accurate scoring | **AcuDock Pro** (with Gnina CNN) | Intermediate | ~15 min |
+| Test one molecule against multiple proteins | **QuickDock** or **Pro** (Multi-Protein tab) | Beginner | ~15 min |
+| Screen a large library (100+) efficiently | **AcuDock Scout** | Intermediate | ~30-60 min |
+
+All three notebooks hide code by default and present a clean widget interface. You never need to edit code unless you want to.
 
 ---
 
-## QuickDock - Getting Started (Beginners)
+## QuickDock - Getting Started
 
 **File:** `AcuDock_QuickDock.ipynb`
 
-QuickDock launches an interactive **Gradio interface** directly inside Colab. No code editing required — just fill in the form and click "Run Docking".
+QuickDock is the simplest way to get started with molecular docking. It provides an interactive tabbed interface with three modes: single docking, batch screening, and multi-protein docking.
 
 ### How to Use QuickDock
 
 #### Step 1: Open and install
 
 - Open `AcuDock_QuickDock.ipynb` in [Google Colab](https://colab.research.google.com/)
-- Run the first cell to install dependencies (~2-3 min)
-- The runtime will **auto-restart** — this is normal
+- Click **Runtime > Run all** -- the first cell installs dependencies (~2-3 min)
+- The runtime will **auto-restart** after installation -- this is normal
 
 #### Step 2: Launch the interface
 
-- After restart, **skip the install cell**
-- Run the remaining cells — a Gradio app appears inline
+- After restart, click **Runtime > Run all** again
+- A tabbed widget panel will appear with three tabs: **Single Dock**, **Batch**, and **Multi-Protein**
 
 #### Step 3: Dock your molecule
 
-In the Gradio interface:
+In the **Single Dock** tab:
 - **PDB ID**: Enter your protein's 4-character code (default: `1HSG` for HIV-1 protease)
-- **SMILES**: Enter your molecule's SMILES string
-- **Engine**: Choose Vina (CPU) or Uni-Dock (GPU) if available
+- **Ligand SMILES**: Enter your molecule's SMILES string (default: Indinavir, a known HIV drug)
+- **Ligand Name**: A label for your molecule
+- **Engine**: Choose `Vina (CPU)` or `Uni-Dock (GPU)` from the dropdown
+- Adjust **Exhaustiveness** and **Box Size** sliders if needed (defaults work well)
 - Click **"Run Docking"** and wait for results
 
-#### Step 4: Adjust parameters (optional)
+#### Step 4: Read your results
 
-```python
-EXHAUSTIVENESS = 32      # How thorough the search is (8=quick, 32=standard, 64=very thorough)
-N_POSES = 20             # How many binding poses to generate
-BOX_SIZE = [20, 20, 20]  # Size of the search area in Angstroms
-```
-
-- **EXHAUSTIVENESS**: Higher values find better results but take longer. Use `8` for quick tests, `32` for standard runs, `64` for publication-quality.
-- **N_POSES**: Number of different binding orientations to report. 20 is a good default.
-- **BOX_SIZE**: The 3D box (in Angstroms) that defines where the program searches for binding. `[20, 20, 20]` works for most binding sites. Increase to `[25, 25, 25]` or `[30, 30, 30]` for larger binding pockets.
-
-#### Step 5: Run all cells
-
-Click **Runtime > Run all** from the menu. The notebook will:
-
-1. Download your protein from the PDB
-2. Clean and prepare the protein (add hydrogens, fix missing atoms)
-3. Convert your SMILES into a 3D molecule
-4. Run the docking simulation
-5. Show a 3D visualization of the best binding pose
-6. Display a table of all poses with scores
-
-#### Step 6: Read your results
-
-- **Score table**: Shows each pose ranked by binding energy (most negative = best)
+Results appear in the right panel:
+- **Score table**: Each binding pose ranked by energy (most negative = best)
 - **3D viewer**: Interactive visualization -- click and drag to rotate, scroll to zoom
-- **CSV export**: Download your results for use in Excel or other tools
+- **CSV download**: Link to download results for Excel or other tools
 
-#### Step 7: Batch screening (optional)
+#### Step 5: Batch screening (optional)
 
-To test multiple molecules at once, edit the compound library in the **Batch Screening** section:
+Switch to the **Batch** tab to test multiple molecules at once. Enter compounds as `Name,SMILES` pairs (one per line) or use the built-in example set.
 
-```python
-COMPOUND_LIBRARY = [
-    ('Aspirin', 'CC(=O)Oc1ccccc1C(=O)O'),
-    ('Ibuprofen', 'CC(C)Cc1ccc(cc1)[C@@H](C)C(=O)O'),
-    ('Your_Molecule', 'your_SMILES_string_here'),
-]
-```
+#### Step 6: Multi-protein docking (optional)
 
-Each entry is a pair of `('Name', 'SMILES')`. Add as many as you like.
+Switch to the **Multi-Protein** tab to test one molecule against several protein targets. Enter PDB IDs one per line. You can optionally specify active site residues for each target (e.g., `1HSG:23,24,25,26`).
 
 ---
 
-## AcuDock Pro - Interactive Mode (Intermediate)
+## AcuDock Pro - Full-Featured Docking
 
 **Files:** `AcuDock_Pro.ipynb` + `acudock_utils.py`
 
-AcuDock Pro gives you a point-and-click interface with sliders and dropdown menus. You do not need to edit any code. It also adds **Gnina CNN rescoring**, which uses a neural network to improve the accuracy of binding predictions.
+AcuDock Pro adds **Gnina CNN rescoring** on top of Vina. Gnina uses a neural network trained on thousands of known protein-drug complexes to re-evaluate each binding pose, improving the success rate of identifying the correct pose from about 58% to about 73%.
 
 ### How to Use AcuDock Pro
 
 #### Step 1: Open and install
 
 - Open `AcuDock_Pro.ipynb` in Google Colab
-- Run the first two cells to install packages and import libraries
-- This takes about 2-3 minutes
+- Click **Runtime > Run all** -- installation takes ~2-3 minutes
+- Runtime auto-restarts; click **Runtime > Run all** again
 
 #### Step 2: Use the widget panel
 
-After running the widget cell, you will see interactive controls:
+The interface has three tabs: **Single Dock**, **Batch**, and **Multi-Protein**. The Single Dock tab includes:
 
 | Control | What It Does | Default |
 |---------|-------------|---------|
-| **PDB ID** | Text field for your protein code | `1HSG` |
-| **SMILES** | Text area for your molecule | Indinavir |
-| **Ligand Name** | Label for your molecule | `Indinavir` |
-| **Exhaustiveness** | Slider (8-128) -- how thorough the search is | 32 |
-| **Num Poses** | Slider (5-50) -- how many poses to return | 20 |
-| **Box Size** | Slider (15-40 Angstroms) -- search area size | 20 |
-| **Scoring Engine** | Dropdown: Vina / Vina + Gnina CNN / Gnina only | Vina |
+| **PDB ID** | Your protein's 4-character code | `1HSG` |
+| **Ligand SMILES** | Your molecule in SMILES format | Indinavir |
+| **Ligand Name** | A label for your molecule | `Indinavir` |
+| **Exhaustiveness** | How thorough the search is (8-128) | 32 |
+| **Num Poses** | How many binding poses to generate (5-50) | 20 |
+| **Box Size** | Search area around the binding site, in Angstroms (15-40) | 20 |
+| **Scoring** | `Vina`, `Vina + Gnina CNN`, or `Consensus` | Vina |
+| **Engine** | `Vina (CPU)` or `Uni-Dock (GPU)` | Vina (CPU) |
 
-Simply change the values in the widgets, then run the subsequent cells.
-
-#### Step 3: Choose a scoring engine
+#### Step 3: Choose a scoring mode
 
 - **Vina**: Fast, reliable baseline scoring. Works on CPU. Good for most uses.
-- **Vina + Gnina CNN**: Docks with Vina, then re-evaluates each pose with a neural network. More accurate ranking (improves success rate from ~58% to ~73%). Requires GPU.
-- **Gnina only**: Uses the neural network for everything. Best accuracy but slower.
+- **Vina + Gnina CNN**: Docks with Vina, then re-evaluates each pose with a neural network for more accurate ranking. Requires a GPU runtime.
+- **Consensus**: Combines Vina and Gnina scores using z-score weighting for the most robust ranking.
 
 To use Gnina, make sure your Colab runtime has a GPU:
 1. Go to **Runtime > Change runtime type**
 2. Select **T4 GPU** under Hardware accelerator
 3. Click **Save**
 
-#### Step 4: Run the cells in order
+#### Step 4: Run and review
 
-Each section runs automatically when you execute the cell:
-- **Protein Preparation**: Downloads and cleans your protein
-- **Ligand Preparation**: Converts your SMILES to 3D
-- **Docking Execution**: Runs the docking (progress bar shown)
-- **Results**: Score table, 3D visualization, interaction analysis
-
-#### Step 5: Batch screening
-
-The batch section at the bottom lets you screen multiple compounds. Edit the compound list or upload a CSV file, then run those cells.
+Click **"Run Docking"** to start. Results include a score table, 3D visualization of the best pose, and a downloadable CSV.
 
 ---
 
-## AcuDock Scout - Large-Scale Screening (Advanced)
+## AcuDock Scout - Large-Scale Screening
 
 **Files:** `AcuDock_Scout.ipynb` + `acudock_surrogate.py` + `acudock_screening.py`
 
-AcuDock Scout is designed for screening large compound libraries (hundreds to millions of molecules). Instead of docking every single molecule (which could take days), it uses **active learning** -- a machine learning technique that intelligently picks which molecules to dock next, finding over 90% of the top hits while only docking a fraction of the library.
+AcuDock Scout is designed for screening large compound libraries (hundreds to thousands of molecules). Instead of docking every single molecule (which could take days), it uses **active learning** -- a machine learning technique that intelligently picks which molecules to dock next, finding over 90% of the top hits while only docking a fraction of the library.
 
-### How Active Learning Works (Simple Explanation)
+### How Active Learning Works
 
-1. **Start**: Randomly pick a small batch of molecules and dock them
-2. **Learn**: Train a fast ML model to predict docking scores from molecular structure
-3. **Select**: Use the ML model to find the most promising un-docked molecules
-4. **Dock**: Only dock those promising molecules
+1. **Start**: Randomly pick a small batch of molecules and dock them (the "bootstrap")
+2. **Learn**: Train a fast ML model to predict docking scores based on molecular structure
+3. **Select**: The model identifies the most promising un-docked molecules -- balancing compounds it predicts will score well with compounds it is uncertain about (to avoid missing surprises)
+4. **Dock**: Only dock those selected molecules
 5. **Repeat**: Retrain the model with the new results, select the next batch, and so on
 
-This is like a librarian who, after reading a few books from each shelf, learns to predict which remaining books are worth reading -- without opening every single one.
+Think of it like a talent scout who watches a few auditions, learns what "good" looks like, and gets increasingly better at picking who to audition next -- skipping the obvious misses.
 
 ### How to Use AcuDock Scout
 
 #### Step 1: Open and install
 
 - Open `AcuDock_Scout.ipynb` in Google Colab
-- Run the first two cells for installation (~2-3 minutes)
+- Click **Runtime > Run all** -- installation takes ~2-3 minutes
+- Runtime auto-restarts; click **Runtime > Run all** again
 
 #### Step 2: Configure your campaign
 
-Edit the configuration cell:
+The widget panel includes controls for the protein target and the active learning parameters:
 
-```python
-# Target protein
-PDB_ID = '1HSG'
+| Parameter | Default | What It Means |
+|-----------|---------|---------------|
+| **PDB ID** | `1HSG` | Your protein target |
+| **Active Site Residues** | `23,24,25,...` | Amino acid positions that define the binding pocket (optional) |
+| **Bootstrap Size** | 100 | How many molecules to dock randomly at the start to seed the ML model |
+| **Batch Size** | 50 | How many molecules to dock per learning cycle |
+| **AL Cycles** | 3 | How many learn-select-dock cycles to run |
+| **UCB Beta** | 1.5 | Controls the explore/exploit tradeoff -- higher values explore more diverse chemistry, lower values focus on predicted top scorers |
+| **Exhaustiveness** | 8 | Lower than Pro/QuickDock defaults because Scout docks many molecules |
+| **Engine** | Vina (CPU) | Choose `Uni-Dock (GPU)` for faster screening on GPU runtimes |
 
-# Active learning parameters
-BOOTSTRAP_SIZE = 100    # How many molecules to dock randomly at the start
-BATCH_SIZE = 50         # How many molecules to dock per cycle
-N_CYCLES = 3            # How many learning cycles to run
-UCB_BETA = 1.5          # Exploration vs. exploitation (see below)
-```
+#### Step 3: Choose a compound library
 
-**Parameter guide:**
+Type one of the following in the **Library** field:
 
-| Parameter | Demo Value | Real Screening Value | What It Means |
-|-----------|-----------|---------------------|---------------|
-| BOOTSTRAP_SIZE | 100 | 1,000-5,000 | More = better initial model, but takes longer |
-| BATCH_SIZE | 50 | 500-2,000 | More per cycle = faster but less efficient |
-| N_CYCLES | 3 | 5-20 | More cycles = better coverage |
-| UCB_BETA | 1.5 | 0.5-3.0 | Low = focus on predicted good molecules. High = explore diverse molecules. 1.5 is a good balance. |
-
-#### Step 3: Provide your compound library
-
-The notebook includes a **demo library** of ~500 molecules for testing. For real screening, replace it with your own library:
-
-**Option A: Edit the SMILES list in the notebook**
-```python
-my_library = [
-    ('Compound_1', 'CCO'),
-    ('Compound_2', 'c1ccccc1'),
-    # ... add more
-]
-```
-
-**Option B: Upload a CSV file**
-Prepare a CSV file with columns `SMILES` and `Name` (or `ID`), then upload it in Colab using the file browser on the left sidebar. Update the library loading cell to point to your file.
+- **`demo`** (default): ~500 compounds derived from 33 common drugs (Aspirin, Ibuprofen, Caffeine, etc.) with structural variations. Good for testing.
+- **`acyl-thiourea`**: ~500 acyl thiourea compounds (R-C(=O)-NH-C(=S)-NH-R') built from 24 acyl groups and 20 amine substituents, including metal-chelating variants. Useful for studying thiourea-based inhibitors.
+- **Custom**: Paste `Name,SMILES` pairs (one per line) directly into the text box, or upload a CSV file with `SMILES` and `Name` columns.
 
 #### Step 4: Run the campaign
 
-Click **Runtime > Run all**. The notebook will:
+Click **"Start Campaign"**. The notebook will:
 
 1. Prepare the protein target
-2. **Cycle 0**: Dock a random bootstrap sample
-3. Train the ML surrogate model
-4. **Cycles 1-N**: Select the most promising molecules, dock them, retrain
-5. Show convergence plots, score distributions, and top hits
+2. **Cycle 0 (Bootstrap)**: Dock a random sample to seed the ML model
+3. **Cycles 1-N**: Select the most promising molecules, dock them, retrain the model
+4. Generate results including convergence plots, score distributions, and a ranked hit list
 
 #### Step 5: Interpret the results
 
-The notebook generates several analysis plots:
-
-- **Convergence plot**: Shows what percentage of top hits were found versus how much of the library was docked. The goal is to hit 90%+ while docking less than 10-20%.
-- **Score distribution**: Compares randomly selected molecules versus ML-selected molecules. The ML-selected batch should have much better (more negative) scores.
-- **Top hits table**: Your best molecules, ranked by binding score with molecular properties.
-- **Chemical diversity**: Shows how structurally diverse your top hits are (you want diverse hits, not many variations of the same molecule).
-- **Feature importance**: Shows which molecular features the ML model uses to predict good binders.
+- **Convergence plot**: Shows how quickly the best score was found versus how much of the library was docked. Ideally you find top hits after docking less than 10-20% of the library.
+- **Score distribution**: Compares randomly selected (bootstrap) molecules versus ML-selected molecules. The ML-selected batch should have much better (more negative) scores.
+- **Surrogate model performance**: Shows how well the ML model predicts docking scores (R-squared and RMSE over cycles). Higher R-squared means the model is learning effectively.
+- **Top 20 hits table**: Your best molecules ranked by binding score, with molecular properties (weight, LogP, hydrogen bond donors/acceptors).
+- **3D viewer**: Interactive visualization of the top hit bound to the protein.
 
 ---
 
@@ -346,6 +295,15 @@ This controls how thoroughly Vina searches for binding poses. Higher values expl
 | 32 | Standard docking (recommended default) | ~1-3 minutes |
 | 64 | Thorough docking for top candidates | ~3-8 minutes |
 | 128 | Publication-quality results | ~10-20 minutes |
+
+### Vina vs. Uni-Dock
+
+Both engines use the same scoring function and produce comparable results. The difference is speed:
+
+- **Vina (CPU)**: Runs on any Colab runtime. Docks one molecule at a time. Best for single molecules or small batches.
+- **Uni-Dock (GPU)**: Runs on GPU runtimes (T4 or A100). Docks many molecules simultaneously on the GPU, achieving 1000x+ speedup for large batches. Best for Scout campaigns or large batch screens. Falls back to Vina automatically if no GPU is available.
+
+To enable GPU: go to **Runtime > Change runtime type** and select **T4 GPU**.
 
 ---
 
@@ -422,14 +380,14 @@ If you have a PDB file from AlphaFold or another source, you can upload it direc
 
 2. **Pose consistency**: If the top 3-5 poses are clustered in the same location on the protein, the docking is more reliable. If they are scattered, the result is uncertain.
 
-3. **Interactions**: In the 3D viewer and interaction analysis, look for:
-   - **Hydrogen bonds** (shown as dashed lines) between the molecule and protein residues
+3. **Interactions**: In the 3D viewer, look for:
+   - **Hydrogen bonds** (dashed lines) between the molecule and protein residues
    - **Hydrophobic contacts** with non-polar protein residues
    - Contact with **known important residues** in the binding site
 
 4. **Molecular properties**: Good drug candidates typically follow "Lipinski's Rule of Five":
    - Molecular weight < 500
-   - LogP < 5 (not too greasy)
+   - LogP < 5 (a measure of how "greasy" a molecule is)
    - Hydrogen bond donors < 5
    - Hydrogen bond acceptors < 10
 
@@ -442,7 +400,7 @@ If you have a PDB file from AlphaFold or another source, you can upload it direc
 ### Exporting and Sharing Results
 
 All notebooks save results as CSV files that you can:
-- Download to your computer (the notebooks include download code)
+- Download to your computer (each results panel includes a download link)
 - Open in Excel, Google Sheets, or any spreadsheet program
 - Share with collaborators for further analysis
 
@@ -452,7 +410,7 @@ All notebooks save results as CSV files that you can:
 
 ### "ModuleNotFoundError" or "ImportError"
 
-This is the most common issue. Packages like `vina` and `rdkit` contain compiled C code that Python can only load after a runtime restart. The install cell now **automatically restarts the runtime** after installation. After the restart:
+This is the most common issue. Packages like `vina` and `rdkit` contain compiled C code that Python can only load after a runtime restart. The install cell **automatically restarts the runtime** after installation. After the restart:
 
 1. **Skip the install cell** (it already ran successfully)
 2. Run from the **imports cell** (the second code cell) onward
@@ -474,8 +432,8 @@ Your SMILES string has a typo or uses unsupported syntax. Try:
 ### "RuntimeError" during docking
 
 Common causes:
-- **Box too small**: Increase `BOX_SIZE` to `[25, 25, 25]` or `[30, 30, 30]`
-- **Box in wrong location**: Check that `ACTIVE_SITE_RESIDUES` matches your protein
+- **Box too small**: Increase the Box Size slider to 25 or 30
+- **Box in wrong location**: Check that the active site residue numbers are correct for your protein
 - **Protein not found**: Verify the PDB ID exists at [rcsb.org](https://www.rcsb.org/)
 
 ### py3Dmol visualization not showing
@@ -486,14 +444,14 @@ Common causes:
 
 ### "Session crashed" or "Out of memory"
 
-- Reduce `N_POSES` or `EXHAUSTIVENESS`
-- For Scout: reduce `BOOTSTRAP_SIZE` and `BATCH_SIZE`
+- Reduce exhaustiveness or the number of poses
+- For Scout: reduce bootstrap size and batch size
 - Go to **Runtime > Change runtime type** and select a GPU runtime (T4 GPU has more memory)
 
 ### Gnina not found (AcuDock Pro)
 
 Gnina needs to be downloaded separately. The notebook should do this automatically, but if it fails:
-1. Run this cell manually:
+1. Run this in a code cell:
    ```
    !wget -q https://github.com/gnina/gnina/releases/latest/download/gnina -O /usr/local/bin/gnina
    !chmod +x /usr/local/bin/gnina
@@ -502,9 +460,9 @@ Gnina needs to be downloaded separately. The notebook should do this automatical
 
 ### Docking takes too long
 
-- Lower `EXHAUSTIVENESS` to `8` for screening, `32` for individual molecules
-- For batch screening, use `exhaustiveness=8` (the notebooks already do this)
+- Lower exhaustiveness to 8 for screening, 32 for individual molecules
 - For Scout: reduce the number of cycles or batch size
+- Switch to Uni-Dock (GPU) in the Engine dropdown for batch or multi-protein docking
 
 ---
 
@@ -512,12 +470,12 @@ Gnina needs to be downloaded separately. The notebook should do this automatical
 
 | File | Purpose | When You Need It |
 |------|---------|-----------------|
-| `AcuDock_QuickDock.ipynb` | Step-by-step docking tutorial | First time users, learning docking |
-| `AcuDock_Pro.ipynb` | Interactive docking with widgets | Point-and-click docking, Gnina CNN |
-| `AcuDock_Scout.ipynb` | Large-scale virtual screening | Screening 100+ molecules |
-| `acudock_utils.py` | Shared functions for Pro | Loaded automatically by Pro notebook |
-| `acudock_surrogate.py` | ML model for Scout | Loaded automatically by Scout notebook |
-| `acudock_screening.py` | Batch docking for Scout | Loaded automatically by Scout notebook |
+| `AcuDock_QuickDock.ipynb` | Single docking, batch screening, multi-protein | Getting started, general use |
+| `AcuDock_Pro.ipynb` | Docking with Gnina CNN rescoring | When you need more accurate pose ranking |
+| `AcuDock_Scout.ipynb` | Active learning virtual screening | Screening large compound libraries (100+) |
+| `acudock_utils.py` | Shared docking and visualization functions | Loaded automatically by QuickDock and Pro |
+| `acudock_surrogate.py` | ML surrogate model for active learning | Loaded automatically by Scout |
+| `acudock_screening.py` | Batch docking manager | Loaded automatically by Scout |
 | `requirements.txt` | Python package list | Reference only (notebooks install packages themselves) |
 | `CLAUDE.md` | Project tracking and technical notes | Developers and contributors |
 
@@ -570,16 +528,16 @@ For rigorous testing, these public datasets are the standard in the field:
 A: Yes. Google Colab's free tier provides enough compute for all three notebooks. AcuDock itself is MIT licensed (free and open source).
 
 **Q: Do I need to know Python?**
-A: For QuickDock, you only need to change a few text values (the PDB ID and SMILES). For AcuDock Pro, you do not need to touch any code at all -- everything is controlled by widgets. For Scout, basic familiarity with Python helps but is not required if you just change the configuration values.
+A: No. All three notebooks use interactive widgets (sliders, text fields, buttons) and the code is hidden by default. You never need to read or edit code.
 
 **Q: How accurate is this?**
-A: AutoDock Vina (the docking engine used here) has a 90.2% docking power score on the CASF benchmark. However, the predicted binding energies have an error margin of about +/- 2 kcal/mol. This is a computational prediction tool, not a replacement for lab experiments.
+A: AutoDock Vina (the primary docking engine) has a 90.2% docking power score on the CASF benchmark. However, the predicted binding energies have an error margin of about +/- 2 kcal/mol. This is a computational prediction tool, not a replacement for lab experiments.
 
 **Q: Can I use this for a real drug discovery project?**
 A: AcuDock is suitable for early-stage virtual screening to identify candidate molecules worth testing in the lab. It is used by academic researchers, students, and early-stage biotech teams. For clinical drug development, results should always be validated experimentally.
 
 **Q: How long does docking take?**
-A: A single molecule takes about 10 seconds to 3 minutes depending on the `EXHAUSTIVENESS` setting. Batch screening of 50 molecules at `exhaustiveness=8` takes about 10-15 minutes. AcuDock Scout can process a 500-molecule demo library in about 30 minutes.
+A: A single molecule takes about 10 seconds to 3 minutes depending on exhaustiveness. Batch screening of 50 molecules at exhaustiveness 8 takes about 10-15 minutes. AcuDock Scout can process a 500-molecule demo library in about 30 minutes on CPU, or significantly faster with Uni-Dock GPU.
 
 **Q: What if my Colab session disconnects?**
 A: Google Colab sessions last 12-24 hours (free tier). If disconnected, you need to re-run the notebook from the beginning. To save progress, download your results CSV before the session ends. For long-running Scout campaigns, consider Google Colab Pro for longer session limits.
@@ -588,7 +546,10 @@ A: Google Colab sessions last 12-24 hours (free tier). If disconnected, you need
 A: Yes. If you have a PDB file from AlphaFold, homology modeling, or another source, upload it to Colab and modify the protein preparation cell to load from the file path instead of fetching by PDB ID.
 
 **Q: What is the difference between Vina and Gnina?**
-A: Vina uses a mathematical formula to estimate binding energy. Gnina adds a neural network (trained on thousands of known protein-drug complexes) that re-evaluates each pose. Gnina improves the success rate of identifying the correct binding pose from about 58% to about 73%. Gnina requires a GPU.
+A: Vina uses a mathematical formula (called a scoring function) to estimate binding energy. Gnina adds a neural network (trained on thousands of known protein-drug complexes) that re-evaluates each pose. Gnina improves the success rate of identifying the correct binding pose from about 58% to about 73%. Gnina requires a GPU runtime.
+
+**Q: What is the difference between Vina and Uni-Dock?**
+A: They use the same scoring function and produce equivalent results. Uni-Dock runs on the GPU and docks many molecules simultaneously, making it 1000x+ faster for large batches. For a single molecule there is no speed advantage. All notebooks let you choose between them via the Engine dropdown, and will automatically fall back to Vina if Uni-Dock is not available.
 
 **Q: Can I run this on my own computer instead of Colab?**
 A: Yes, but you will need to install Python and all the dependencies listed in `requirements.txt`. Google Colab is recommended because it handles all of this automatically.
