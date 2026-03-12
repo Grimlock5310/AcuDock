@@ -158,17 +158,24 @@ class BatchDockingManager:
 
         return output_path
 
-    def _mol_descriptors(self, smiles):
-        """Compute molecular descriptors for a SMILES string."""
-        mol = Chem.MolFromSmiles(smiles)
-        if mol is None:
-            return {}
-        return {
-            'MW': Descriptors.MolWt(mol),
-            'LogP': Descriptors.MolLogP(mol),
-            'HBD': Descriptors.NumHDonors(mol),
-            'HBA': Descriptors.NumHAcceptors(mol),
-        }
+    def _mol_descriptors(self, smiles, best_score=None):
+        """Compute molecular descriptors for a SMILES string.
+
+        Uses acudock_utils.get_ligand_properties() for extended metrics.
+        """
+        try:
+            from acudock_utils import get_ligand_properties
+            return get_ligand_properties(smiles, docking_score=best_score)
+        except ImportError:
+            mol = Chem.MolFromSmiles(smiles)
+            if mol is None:
+                return {}
+            return {
+                'MW': Descriptors.MolWt(mol),
+                'LogP': Descriptors.MolLogP(mol),
+                'HBD': Descriptors.NumHDonors(mol),
+                'HBA': Descriptors.NumHAcceptors(mol),
+            }
 
     def dock_batch(self, compounds, progress_callback=None):
         """Dock a batch of (name, SMILES) compounds.
@@ -253,12 +260,15 @@ class BatchDockingManager:
 
             if scores and scores[0][0] <= 0:
                 best_score = scores[0][0]
-                desc = self._mol_descriptors(smiles)
+                desc = self._mol_descriptors(smiles, best_score=best_score)
                 results.append({
                     'Name': name, 'SMILES': smiles,
                     'Best_Score': best_score,
                     'MW': desc.get('MW'), 'LogP': desc.get('LogP'),
                     'HBD': desc.get('HBD'), 'HBA': desc.get('HBA'),
+                    'QED': desc.get('QED'), 'SA_Score': desc.get('SA_Score'),
+                    'PAINS_Count': desc.get('PAINS_Count', 0),
+                    'LE': desc.get('LE'), 'LLE': desc.get('LLE'),
                     'Num_Poses': len(scores),
                     'Dock_Time_s': round(per_mol_time, 2),
                 })
@@ -270,6 +280,8 @@ class BatchDockingManager:
                     'Name': name, 'SMILES': smiles,
                     'Best_Score': None, 'MW': None, 'LogP': None,
                     'HBD': None, 'HBA': None,
+                    'QED': None, 'SA_Score': None,
+                    'PAINS_Count': None, 'LE': None, 'LLE': None,
                     'Num_Poses': 0, 'Dock_Time_s': round(per_mol_time, 2),
                 })
 
@@ -315,13 +327,16 @@ class BatchDockingManager:
 
                 energies = v.energies()
                 best_score = energies[0][0]
-                desc = self._mol_descriptors(smiles)
+                desc = self._mol_descriptors(smiles, best_score=best_score)
 
                 result = {
                     'Name': name, 'SMILES': smiles,
                     'Best_Score': best_score,
                     'MW': desc.get('MW'), 'LogP': desc.get('LogP'),
                     'HBD': desc.get('HBD'), 'HBA': desc.get('HBA'),
+                    'QED': desc.get('QED'), 'SA_Score': desc.get('SA_Score'),
+                    'PAINS_Count': desc.get('PAINS_Count', 0),
+                    'LE': desc.get('LE'), 'LLE': desc.get('LLE'),
                     'Num_Poses': len(energies),
                     'Dock_Time_s': round(time.time() - t0, 2),
                 }
@@ -338,6 +353,8 @@ class BatchDockingManager:
                     'Name': name, 'SMILES': smiles,
                     'Best_Score': None, 'MW': None, 'LogP': None,
                     'HBD': None, 'HBA': None,
+                    'QED': None, 'SA_Score': None,
+                    'PAINS_Count': None, 'LE': None, 'LLE': None,
                     'Num_Poses': 0,
                     'Dock_Time_s': round(time.time() - t0, 2),
                 })
