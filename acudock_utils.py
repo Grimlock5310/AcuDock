@@ -9,19 +9,54 @@ Designed for use in Google Colab with ipywidgets interfaces.
 """
 
 import os
+import sys
 import subprocess
 import tempfile
 import warnings
 import base64
 import uuid
+import io
+import math
 
 import numpy as np
 import pandas as pd
 from rdkit import Chem
-from rdkit.Chem import AllChem, Descriptors, Draw
+from rdkit.Chem import AllChem, Descriptors, Draw, RDConfig
+from rdkit.Chem import QED as _QED_module
+from rdkit.Chem.FilterCatalog import FilterCatalog, FilterCatalogParams
 import meeko
 
 warnings.filterwarnings('ignore')
+
+# ---------------------------------------------------------------------------
+# Lazy singletons for expensive objects
+# ---------------------------------------------------------------------------
+
+_pains_catalog = None
+_sa_scorer_fn = None
+
+
+def _get_pains_catalog():
+    global _pains_catalog
+    if _pains_catalog is None:
+        params = FilterCatalogParams()
+        params.AddCatalog(FilterCatalogParams.FilterCatalogs.PAINS)
+        _pains_catalog = FilterCatalog(params)
+    return _pains_catalog
+
+
+def _get_sa_scorer():
+    global _sa_scorer_fn
+    if _sa_scorer_fn is None:
+        try:
+            sa_path = os.path.join(RDConfig.RDContribDir, 'SA_Score')
+            if sa_path not in sys.path:
+                sys.path.insert(0, sa_path)
+            from sascorer import calculateScore
+            _sa_scorer_fn = calculateScore
+        except Exception:
+            _sa_scorer_fn = lambda mol: None
+    return _sa_scorer_fn
 
 # ---------------------------------------------------------------------------
 # Protein Preparation
@@ -128,19 +163,56 @@ def prepare_ligand(smiles, name='ligand', output_dir='/content/acudock_pro'):
     return pdbqt_path, mol
 
 
-def get_ligand_properties(smiles):
-    """Calculate basic molecular properties from SMILES."""
+def get_ligand_properties(smiles, docking_score=None):
+    """Calculate molecular properties including drug-likeness metrics.
+
+    Args:
+        smiles: SMILES string.
+        docking_score: Optional docking score (kcal/mol) for efficiency metrics.
+
+    Returns dict with MW, LogP, HBD, HBA, RotBonds, TPSA, HeavyAtoms,
+    QED, SA_Score, PAINS (list), PAINS_Count, and optionally LE, LLE.
+    """
     mol = Chem.MolFromSmiles(smiles)
     if mol is None:
         return {}
-    return {
-        'MW': round(Descriptors.MolWt(mol), 1),
-        'LogP': round(Descriptors.MolLogP(mol), 2),
+
+    mw = Descriptors.MolWt(mol)
+    logp = Descriptors.MolLogP(mol)
+    heavy = mol.GetNumHeavyAtoms()
+
+    # PAINS alerts
+    catalog = _get_pains_catalog()
+    pains = []
+    for entry in catalog.GetMatches(mol):
+        pains.append(entry.GetDescription())
+
+    # Synthetic accessibility
+    sa_fn = _get_sa_scorer()
+    sa_val = sa_fn(mol)
+
+    props = {
+        'MW': round(mw, 1),
+        'LogP': round(logp, 2),
         'HBD': Descriptors.NumHDonors(mol),
         'HBA': Descriptors.NumHAcceptors(mol),
         'RotBonds': Descriptors.NumRotatableBonds(mol),
         'TPSA': round(Descriptors.TPSA(mol), 1),
+        'HeavyAtoms': heavy,
+        'QED': round(_QED_module.qed(mol), 3),
+        'SA_Score': round(sa_val, 2) if sa_val is not None else None,
+        'PAINS': pains,
+        'PAINS_Count': len(pains),
     }
+
+    if docking_score is not None and docking_score < 0:
+        R, T = 1.987e-3, 298.15
+        kd_M = math.exp(docking_score / (R * T))
+        pKd = -math.log10(kd_M) if kd_M > 0 else 0
+        props['LE'] = round(-docking_score / max(1, heavy), 3)
+        props['LLE'] = round(pKd - logp, 2)
+
+    return props
 
 
 # ---------------------------------------------------------------------------
@@ -313,6 +385,445 @@ def get_binding_site_center(pdb_path, chain='A', residues=None):
 
     center = np.array(coords).mean(axis=0) * 10  # nm -> Angstroms
     return center.tolist()
+
+
+# Common non-ligand heterogens to exclude during binding site detection
+_EXCLUDED_HETEROGENS = {
+    'HOH', 'WAT', 'NA', 'CL', 'MG', 'ZN', 'CA', 'K', 'MN', 'FE', 'CO',
+    'NI', 'CU', 'SO4', 'PO4', 'GOL', 'EDO', 'ACT', 'DMS', 'BME', 'IOD',
+    'MPD', 'PEG', 'PGE', 'EPE', 'TRS', 'MES', 'CIT', 'FMT', 'NH4',
+}
+
+
+def detect_binding_site(pdb_id, output_dir='/content'):
+    """Auto-detect the binding site from co-crystallized ligands in a PDB structure.
+
+    Downloads the original PDB (before preparation removes heterogens),
+    finds the largest non-solvent heterogen, and returns its centroid
+    plus nearby protein residues.
+
+    Returns dict with keys:
+        center: [x, y, z] in Angstroms, or None if no ligand found
+        het_name: 3-letter code of detected ligand
+        het_atoms: number of heavy atoms in the ligand
+        nearby_residues: list of residue numbers within 5A
+        method: 'heterogen' or 'none'
+    """
+    import urllib.request
+
+    os.makedirs(output_dir, exist_ok=True)
+    raw_pdb = os.path.join(output_dir, f'{pdb_id}_raw.pdb')
+
+    # Download original PDB
+    url = f'https://files.rcsb.org/download/{pdb_id.upper()}.pdb'
+    try:
+        urllib.request.urlretrieve(url, raw_pdb)
+    except Exception as e:
+        print(f'Could not download PDB {pdb_id}: {e}')
+        return {'center': None, 'method': 'none'}
+
+    # Parse HETATM records
+    het_groups = {}  # res_name -> list of (x, y, z)
+    protein_atoms = []  # list of (x, y, z, res_id)
+
+    with open(raw_pdb, 'r') as f:
+        for line in f:
+            if line.startswith('HETATM'):
+                res_name = line[17:20].strip()
+                if res_name in _EXCLUDED_HETEROGENS:
+                    continue
+                try:
+                    x = float(line[30:38])
+                    y = float(line[38:46])
+                    z = float(line[46:54])
+                    het_groups.setdefault(res_name, []).append((x, y, z))
+                except (ValueError, IndexError):
+                    pass
+            elif line.startswith('ATOM'):
+                try:
+                    x = float(line[30:38])
+                    y = float(line[38:46])
+                    z = float(line[46:54])
+                    res_id = int(line[22:26].strip())
+                    protein_atoms.append((x, y, z, res_id))
+                except (ValueError, IndexError):
+                    pass
+
+    if not het_groups:
+        return {'center': None, 'method': 'none'}
+
+    # Pick the largest heterogen group
+    best_het = max(het_groups, key=lambda k: len(het_groups[k]))
+    coords = np.array(het_groups[best_het])
+    center = coords.mean(axis=0).tolist()
+
+    # Find protein residues within 5A of the ligand
+    nearby = set()
+    if protein_atoms:
+        prot_arr = np.array([(a[0], a[1], a[2]) for a in protein_atoms])
+        for hx, hy, hz in coords:
+            dists = np.sqrt(((prot_arr - np.array([hx, hy, hz])) ** 2).sum(axis=1))
+            close_idx = np.where(dists < 5.0)[0]
+            for idx in close_idx:
+                nearby.add(protein_atoms[idx][3])
+
+    return {
+        'center': center,
+        'het_name': best_het,
+        'het_atoms': len(het_groups[best_het]),
+        'nearby_residues': sorted(nearby),
+        'method': 'heterogen',
+    }
+
+
+# ---------------------------------------------------------------------------
+# Protein-Ligand Interaction Fingerprints (ProLIF)
+# ---------------------------------------------------------------------------
+
+def compute_interaction_fingerprint(protein_pdb, poses_pdbqt, pose_index=0,
+                                     smiles=None):
+    """Compute protein-ligand interaction fingerprint using ProLIF.
+
+    Args:
+        protein_pdb: Path to prepared protein PDB.
+        poses_pdbqt: Path to multi-model PDBQT poses file.
+        pose_index: Which pose to analyze (0 = best).
+        smiles: Ligand SMILES (used for bond order assignment).
+
+    Returns:
+        (summary_df, interaction_counts) or (None, None) if ProLIF unavailable.
+
+        summary_df: DataFrame with columns [Residue, Type] listing each
+                    detected interaction.
+        interaction_counts: dict mapping interaction type -> count.
+    """
+    try:
+        import prolif
+        import MDAnalysis as mda
+    except ImportError:
+        return None, None
+
+    try:
+        # Load protein
+        prot = mda.Universe(protein_pdb)
+        prot_mol = prolif.Molecule.from_mda(prot)
+
+        # Extract pose and write temp PDB
+        pose_data = extract_pose_from_pdbqt(poses_pdbqt, pose_index)
+        clean_data = _clean_pdbqt_for_viewer(pose_data)
+        tmp_pdb = tempfile.NamedTemporaryFile(suffix='.pdb', delete=False, mode='w')
+        tmp_pdb.write(clean_data)
+        tmp_pdb.close()
+
+        lig_u = mda.Universe(tmp_pdb.name)
+        lig_mol = prolif.Molecule.from_mda(lig_u)
+
+        # Compute fingerprint
+        fp = prolif.Fingerprint()
+        fp.run_from_iterable([lig_mol], prot_mol)
+        df = fp.to_dataframe()
+
+        os.unlink(tmp_pdb.name)
+
+        # Parse into summary
+        interactions = []
+        counts = {}
+        if not df.empty:
+            for col in df.columns:
+                if df[col].any():
+                    # Column format: (ligand_resname, protein_resname, interaction_type)
+                    if isinstance(col, tuple) and len(col) >= 3:
+                        res = str(col[1])
+                        itype = str(col[2])
+                    else:
+                        res = str(col)
+                        itype = 'Unknown'
+                    interactions.append({'Residue': res, 'Type': itype})
+                    counts[itype] = counts.get(itype, 0) + 1
+
+        summary_df = pd.DataFrame(interactions) if interactions else pd.DataFrame(
+            columns=['Residue', 'Type'])
+        return summary_df, counts
+
+    except Exception as e:
+        print(f'ProLIF interaction analysis failed: {e}')
+        return None, None
+
+
+def interaction_fingerprint_to_html(summary_df):
+    """Convert interaction summary DataFrame to a styled HTML table."""
+    if summary_df is None or summary_df.empty:
+        return '<p><em>No interactions detected.</em></p>'
+
+    type_colors = {
+        'HBDonor': '#2196F3', 'HBAcceptor': '#03A9F4',
+        'Hydrophobic': '#4CAF50', 'PiStacking': '#9C27B0',
+        'PiCation': '#E91E63', 'SaltBridge': '#F44336',
+        'Anionic': '#FF5722', 'Cationic': '#FF9800',
+        'FaceToFace': '#9C27B0', 'EdgeToFace': '#7B1FA2',
+    }
+
+    rows = []
+    for _, r in summary_df.iterrows():
+        color = type_colors.get(r['Type'], '#607D8B')
+        rows.append(
+            f'<tr><td>{r["Residue"]}</td>'
+            f'<td><span style="background:{color};color:white;'
+            f'padding:2px 8px;border-radius:3px;">{r["Type"]}</span></td></tr>'
+        )
+
+    return (
+        '<table style="border-collapse:collapse;font-size:13px;">'
+        '<tr style="background:#f5f5f5;"><th style="padding:4px 12px;">Residue</th>'
+        '<th style="padding:4px 12px;">Interaction</th></tr>'
+        + ''.join(rows) + '</table>'
+    )
+
+
+# ---------------------------------------------------------------------------
+# 3D View Capture (for PDF reports)
+# ---------------------------------------------------------------------------
+
+def capture_3d_views_matplotlib(protein_pdb, poses_pdbqt, output_dir,
+                                 pose_index=0, prefix='pose'):
+    """Render 6-axis 3D views of a docked pose using matplotlib.
+
+    Creates simple stick-model renderings from +X, -X, +Y, -Y, +Z, -Z.
+    Returns dict mapping orientation name to PNG file path.
+    """
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
+
+    # Parse protein atoms (CA only for speed)
+    prot_coords = []
+    with open(protein_pdb, 'r') as f:
+        for line in f:
+            if line.startswith('ATOM') and line[12:16].strip() == 'CA':
+                try:
+                    x = float(line[30:38])
+                    y = float(line[38:46])
+                    z = float(line[46:54])
+                    prot_coords.append((x, y, z))
+                except (ValueError, IndexError):
+                    pass
+
+    # Parse ligand atoms
+    pose_data = extract_pose_from_pdbqt(poses_pdbqt, pose_index)
+    clean = _clean_pdbqt_for_viewer(pose_data)
+    lig_coords = []
+    lig_elements = []
+    for line in clean.split('\n'):
+        if line.startswith(('ATOM', 'HETATM')):
+            try:
+                x = float(line[30:38])
+                y = float(line[38:46])
+                z = float(line[46:54])
+                elem = line[76:78].strip() if len(line) > 76 else line[12:14].strip()
+                if not elem:
+                    elem = line[12:16].strip()[0]
+                lig_coords.append((x, y, z))
+                lig_elements.append(elem.upper())
+            except (ValueError, IndexError):
+                pass
+
+    if not lig_coords:
+        return {}
+
+    prot_arr = np.array(prot_coords) if prot_coords else np.empty((0, 3))
+    lig_arr = np.array(lig_coords)
+
+    elem_colors = {
+        'C': '#808080', 'N': '#3050F8', 'O': '#FF0D0D', 'S': '#FFFF30',
+        'H': '#FFFFFF', 'F': '#90E050', 'CL': '#1FF01F', 'BR': '#A62929',
+        'P': '#FF8000', 'I': '#940094',
+    }
+
+    # 6 orientations: (elevation, azimuth, label)
+    orientations = [
+        (0, 0, 'front'), (0, 180, 'back'),
+        (0, 90, 'right'), (0, -90, 'left'),
+        (90, 0, 'top'), (-90, 0, 'bottom'),
+    ]
+
+    os.makedirs(output_dir, exist_ok=True)
+    paths = {}
+
+    # Center on ligand
+    lig_center = lig_arr.mean(axis=0)
+    lig_range = max(lig_arr.max(axis=0) - lig_arr.min(axis=0)) * 0.7 + 5
+
+    for elev, azim, name in orientations:
+        fig = plt.figure(figsize=(4, 4), dpi=150)
+        ax = fig.add_subplot(111, projection='3d')
+        ax.set_facecolor('white')
+
+        # Draw nearby protein backbone
+        if len(prot_arr) > 0:
+            dists = np.sqrt(((prot_arr - lig_center) ** 2).sum(axis=1))
+            nearby = prot_arr[dists < 15]
+            if len(nearby) > 1:
+                ax.plot(nearby[:, 0], nearby[:, 1], nearby[:, 2],
+                        'o-', color='#cccccc', markersize=1, linewidth=0.5, alpha=0.4)
+
+        # Draw ligand atoms
+        for i, (x, y, z) in enumerate(lig_coords):
+            elem = lig_elements[i] if i < len(lig_elements) else 'C'
+            color = elem_colors.get(elem, '#FF69B4')
+            ax.scatter(x, y, z, c=color, s=40, edgecolors='black', linewidths=0.3)
+
+        # Draw ligand bonds (atoms within 1.9A)
+        for i in range(len(lig_arr)):
+            for j in range(i + 1, len(lig_arr)):
+                dist = np.linalg.norm(lig_arr[i] - lig_arr[j])
+                if dist < 1.9:
+                    ax.plot([lig_arr[i, 0], lig_arr[j, 0]],
+                            [lig_arr[i, 1], lig_arr[j, 1]],
+                            [lig_arr[i, 2], lig_arr[j, 2]],
+                            color='#404040', linewidth=1.5)
+
+        ax.view_init(elev=elev, azim=azim)
+        ax.set_xlim(lig_center[0] - lig_range, lig_center[0] + lig_range)
+        ax.set_ylim(lig_center[1] - lig_range, lig_center[1] + lig_range)
+        ax.set_zlim(lig_center[2] - lig_range, lig_center[2] + lig_range)
+        ax.set_axis_off()
+        ax.set_title(name.capitalize(), fontsize=10, pad=-5)
+
+        path = os.path.join(output_dir, f'{prefix}_{name}.png')
+        fig.savefig(path, dpi=150, bbox_inches='tight', facecolor='white')
+        plt.close(fig)
+        paths[name] = path
+
+    return paths
+
+
+def capture_3d_views_js(protein_pdb_data, ligand_pdb_data):
+    """Generate JavaScript code for 6-axis 3Dmol.js PNG capture in Colab.
+
+    Returns a JS string that, when executed via google.colab.output.eval_js(),
+    produces a JSON dict mapping orientation names to base64 PNG data.
+    Use this from within a notebook cell.
+    """
+    prot_b64 = base64.b64encode(protein_pdb_data.encode()).decode()
+    lig_b64 = base64.b64encode(ligand_pdb_data.encode()).decode()
+
+    js = f"""
+    (async function() {{
+        await new Promise(r => {{
+            if (window.$3Dmol) {{ r(); return; }}
+            var s = document.createElement('script');
+            s.src = 'https://3Dmol.org/build/3Dmol-min.js';
+            s.onload = r;
+            document.head.appendChild(s);
+        }});
+
+        var div = document.createElement('div');
+        div.style.width = '600px';
+        div.style.height = '600px';
+        div.style.position = 'fixed';
+        div.style.left = '-9999px';
+        document.body.appendChild(div);
+
+        var v = $3Dmol.createViewer(div, {{backgroundColor: 'white'}});
+        v.addModel(atob("{prot_b64}"), "pdb");
+        v.setStyle({{model:0}}, {{cartoon:{{color:'spectrum',opacity:0.8}}}});
+        v.addModel(atob("{lig_b64}"), "pdb");
+        v.setStyle({{model:1}}, {{stick:{{colorscheme:'greenCarbon',radius:0.2}}}});
+        v.zoomTo({{model:1}});
+        v.zoom(0.7);
+        v.render();
+
+        var orientations = [
+            [0, 0, 1, 'front'], [0, 0, -1, 'back'],
+            [1, 0, 0, 'right'], [-1, 0, 0, 'left'],
+            [0, 1, 0, 'top'], [0, -1, 0, 'bottom']
+        ];
+
+        var results = {{}};
+        for (var o of orientations) {{
+            v.setCameraParameters({{direction: {{x:o[0], y:o[1], z:o[2]}}}});
+            v.render();
+            await new Promise(r => setTimeout(r, 200));
+            var uri = v.pngURI();
+            results[o[3]] = uri.split(',')[1];
+        }}
+
+        document.body.removeChild(div);
+        return JSON.stringify(results);
+    }})()
+    """
+    return js
+
+
+def capture_3d_views(protein_pdb, poses_pdbqt, output_dir,
+                      pose_index=0, prefix='pose'):
+    """Capture 6-axis 3D views, trying JS first, then matplotlib fallback.
+
+    Must be called from a notebook cell for JS capture to work.
+    Returns dict mapping orientation name to PNG file path.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Try JS capture via Colab
+    try:
+        import json as _json
+        from google.colab import output as colab_output
+
+        with open(protein_pdb, 'r') as f:
+            prot_data = f.read()
+        pose_data = extract_pose_from_pdbqt(poses_pdbqt, pose_index)
+        lig_data = _clean_pdbqt_for_viewer(pose_data)
+
+        js_code = capture_3d_views_js(prot_data, lig_data)
+        result_json = colab_output.eval_js(js_code)
+        captures = _json.loads(result_json)
+
+        paths = {}
+        for name, b64_data in captures.items():
+            img_bytes = base64.b64decode(b64_data)
+            path = os.path.join(output_dir, f'{prefix}_{name}.png')
+            with open(path, 'wb') as f:
+                f.write(img_bytes)
+            paths[name] = path
+
+        if paths:
+            print(f'  Captured {len(paths)} 3D views via 3Dmol.js')
+            return paths
+    except Exception:
+        pass
+
+    # Fallback to matplotlib
+    paths = capture_3d_views_matplotlib(
+        protein_pdb, poses_pdbqt, output_dir,
+        pose_index=pose_index, prefix=prefix
+    )
+    if paths:
+        print(f'  Rendered {len(paths)} 3D views via matplotlib')
+    return paths
+
+
+# ---------------------------------------------------------------------------
+# Google Drive helpers
+# ---------------------------------------------------------------------------
+
+def mount_google_drive(mount_point='/content/drive'):
+    """Mount Google Drive in Colab. Returns True on success."""
+    try:
+        from google.colab import drive
+        drive.mount(mount_point, force_remount=False)
+        return True
+    except Exception:
+        return False
+
+
+def ensure_drive_dir(base='/content/drive/MyDrive/AcuDock'):
+    """Create AcuDock directory on Drive. Returns path or None."""
+    try:
+        os.makedirs(base, exist_ok=True)
+        return base
+    except Exception:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -837,9 +1348,17 @@ def _dock_single_protein(args):
         receptor_pdbqt = pdb_to_pdbqt(protein_pdb)
         row['Prep_Time_s'] = round(time.time() - t0, 1)
 
-        # Binding site center
-        center = get_binding_site_center(protein_pdb, chain='A',
-                                         residues=residues)
+        # Binding site center (auto-detect if no residues given)
+        if residues:
+            center = get_binding_site_center(protein_pdb, chain='A',
+                                             residues=residues)
+        else:
+            detected = detect_binding_site(pdb_id, output_dir=pdb_dir)
+            if detected.get('center'):
+                center = detected['center']
+            else:
+                center = get_binding_site_center(protein_pdb, chain='A',
+                                                 residues=None)
         row['Center'] = f'[{center[0]:.1f}, {center[1]:.1f}, {center[2]:.1f}]'
 
         # Dock — try Uni-Dock first if requested, fall back to Vina
