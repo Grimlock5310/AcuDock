@@ -897,11 +897,11 @@ def display_3d_viewer(view):
 
     html_content = view._make_html()
     b64 = base64.b64encode(html_content.encode()).decode()
-    w = getattr(view, 'width', 800)
-    h = getattr(view, 'height', 600)
+    w = view.width if isinstance(view.width, (int, float)) else 800
+    h = view.height if isinstance(view.height, (int, float)) else 600
     display(HTML(
         f'<iframe src="data:text/html;base64,{b64}" '
-        f'width="{w + 20}" height="{h + 20}" '
+        f'width="{int(w) + 20}" height="{int(h) + 20}" '
         f'style="border:1px solid #ddd; border-radius:4px;"></iframe>'
     ))
 
