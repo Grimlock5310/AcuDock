@@ -334,6 +334,8 @@ def consensus_score(vina_energies, gnina_scores=None, alpha=0.5):
     df = pd.DataFrame({
         'Pose': range(1, len(vina_energies) + 1),
         'Vina_Score': [e[0] for e in vina_energies],
+        'RMSD_lb': [round(e[1], 2) if len(e) > 1 else 0.0 for e in vina_energies],
+        'RMSD_ub': [round(e[2], 2) if len(e) > 2 else 0.0 for e in vina_energies],
     })
 
     # Z-score normalize Vina (invert: more negative is better -> higher z = better)
@@ -766,15 +768,29 @@ def capture_3d_views_matplotlib(protein_pdb, poses_pdbqt, output_dir,
     return paths
 
 
-def capture_3d_views_js(protein_pdb_data, ligand_pdb_data):
-    """Generate JavaScript code for 6-axis 3Dmol.js PNG capture in Colab.
+def capture_py3dmol_overview(protein_pdb, poses_pdbqt, output_dir,
+                             pose_index=0, prefix='pose'):
+    """Capture py3Dmol ribbon view as PNG using JavaScript pngURI() in Colab.
 
-    Returns a JS string that, when executed via google.colab.output.eval_js(),
-    produces a JSON dict mapping orientation names to base64 PNG data.
-    Use this from within a notebook cell.
+    Creates the same spectrum-colored cartoon protein + green ligand sticks +
+    translucent surface that the interactive viewer shows, and captures it as
+    a static PNG image for PDF reports.
+
+    Returns path to the saved PNG, or None if JS capture fails.
     """
-    prot_b64 = base64.b64encode(protein_pdb_data.encode()).decode()
-    lig_b64 = base64.b64encode(ligand_pdb_data.encode()).decode()
+    try:
+        from google.colab import output as colab_output
+    except ImportError:
+        return None
+
+    with open(protein_pdb, 'r') as f:
+        protein_data = f.read()
+
+    pose_data = extract_pose_from_pdbqt(poses_pdbqt, pose_index)
+    ligand_data = _clean_pdbqt_for_viewer(pose_data)
+
+    prot_b64 = base64.b64encode(protein_data.encode()).decode()
+    lig_b64 = base64.b64encode(ligand_data.encode()).decode()
 
     js = f"""
     (async function() {{
@@ -787,7 +803,7 @@ def capture_3d_views_js(protein_pdb_data, ligand_pdb_data):
         }});
 
         var div = document.createElement('div');
-        div.style.width = '600px';
+        div.style.width = '800px';
         div.style.height = '600px';
         div.style.position = 'fixed';
         div.style.left = '-9999px';
@@ -798,46 +814,68 @@ def capture_3d_views_js(protein_pdb_data, ligand_pdb_data):
         v.setStyle({{model:0}}, {{cartoon:{{color:'spectrum',opacity:0.8}}}});
         v.addModel(atob("{lig_b64}"), "pdb");
         v.setStyle({{model:1}}, {{stick:{{colorscheme:'greenCarbon',radius:0.2}}}});
+        v.addSurface($3Dmol.SurfaceType.VDW,
+                     {{opacity:0.25, color:'green'}}, {{model:1}});
         v.zoomTo({{model:1}});
         v.zoom(0.7);
         v.render();
 
-        var orientations = [
-            [0, 0, 1, 'front'], [0, 0, -1, 'back'],
-            [1, 0, 0, 'right'], [-1, 0, 0, 'left'],
-            [0, 1, 0, 'top'], [0, -1, 0, 'bottom']
-        ];
-
-        var results = {{}};
-        for (var o of orientations) {{
-            v.setCameraParameters({{direction: {{x:o[0], y:o[1], z:o[2]}}}});
-            v.render();
-            await new Promise(r => setTimeout(r, 200));
-            var uri = v.pngURI();
-            results[o[3]] = uri.split(',')[1];
-        }}
-
+        await new Promise(r => setTimeout(r, 500));
+        var uri = v.pngURI();
         document.body.removeChild(div);
-        return JSON.stringify(results);
+        return uri.split(',')[1];
     }})()
     """
-    return js
+
+    try:
+        result = colab_output.eval_js(js)
+        if result and len(result) > 100:
+            png_data = base64.b64decode(result)
+            out_path = os.path.join(output_dir, f'{prefix}_overview.png')
+            with open(out_path, 'wb') as f:
+                f.write(png_data)
+            return out_path
+    except Exception as e:
+        print(f'  JS capture failed: {e}')
+
+    return None
 
 
 def capture_3d_views(protein_pdb, poses_pdbqt, output_dir,
                       pose_index=0, prefix='pose'):
-    """Capture 6-axis 3D views using matplotlib.
+    """Capture 3D views for PDF reports.
 
-    Returns dict mapping orientation name to PNG file path.
+    Tries py3Dmol JS capture for the overview (ribbon/cartoon view),
+    falls back to matplotlib. Always generates matplotlib binding site view.
+
+    Returns dict mapping view name to PNG file path.
     """
     os.makedirs(output_dir, exist_ok=True)
+    paths = {}
 
-    paths = capture_3d_views_matplotlib(
+    # Try py3Dmol JS capture for overview (matches interactive viewer)
+    overview_path = capture_py3dmol_overview(
         protein_pdb, poses_pdbqt, output_dir,
         pose_index=pose_index, prefix=prefix
     )
-    if paths:
-        print(f'  Rendered {len(paths)} 3D views via matplotlib')
+    if overview_path:
+        paths['overview'] = overview_path
+        print('  Captured py3Dmol ribbon view for PDF')
+
+    # Generate matplotlib views (overview fallback + binding site)
+    mpl_paths = capture_3d_views_matplotlib(
+        protein_pdb, poses_pdbqt, output_dir,
+        pose_index=pose_index, prefix=prefix
+    )
+    if mpl_paths:
+        # Use matplotlib overview only if JS capture failed
+        if 'overview' not in paths and 'overview' in mpl_paths:
+            paths['overview'] = mpl_paths['overview']
+        # Always include binding site from matplotlib
+        if 'binding_site' in mpl_paths:
+            paths['binding_site'] = mpl_paths['binding_site']
+        print(f'  Rendered {len(mpl_paths)} views via matplotlib')
+
     return paths
 
 

@@ -432,8 +432,8 @@ def _make_score_table(results_df, styles):
     score_col = _find_column(results_df,
                              ['Vina Score', 'Score', 'Affinity', 'Best_Score',
                               'Vina_Score', 'score', 'affinity', 'vina_score'])
-    rmsd_lb_col = _find_column(results_df, ['RMSD_lb', 'rmsd_lb', 'RMSD_l.b.', 'RMSD l.b.'])
-    rmsd_ub_col = _find_column(results_df, ['RMSD_ub', 'rmsd_ub', 'RMSD_u.b.', 'RMSD u.b.'])
+    rmsd_lb_col = _find_column(results_df, ['RMSD_lb', 'RMSD_lb (A)', 'rmsd_lb', 'RMSD_l.b.', 'RMSD l.b.'])
+    rmsd_ub_col = _find_column(results_df, ['RMSD_ub', 'RMSD_ub (A)', 'rmsd_ub', 'RMSD_u.b.', 'RMSD u.b.'])
 
     headers = ['Pose', 'Score (kcal/mol)', 'RMSD l.b.', 'RMSD u.b.',
                'Est. Kd', 'Quality']
