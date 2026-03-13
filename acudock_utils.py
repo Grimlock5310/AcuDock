@@ -124,16 +124,20 @@ def pdb_to_pdbqt(pdb_path, output_path=None, is_receptor=True):
 # ---------------------------------------------------------------------------
 
 def _has_metal_atoms(mol):
-    """Check if an RDKit molecule contains metal atoms."""
+    """Check if an RDKit molecule contains metal atoms.
+
+    Returns a list of metal element symbols found, or empty list if none.
+    """
     metals = {
         3, 4, 11, 12, 13, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30,
         31, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 55, 56,
         57, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83,  # d-block + common
     }
+    found = []
     for atom in mol.GetAtoms():
         if atom.GetAtomicNum() in metals:
-            return True
-    return False
+            found.append(atom.GetSymbol())
+    return found
 
 
 def _prepare_ligand_obabel(smiles, pdbqt_path):
@@ -187,11 +191,8 @@ def prepare_ligand(smiles, name='ligand', output_dir='/content/acudock_pro'):
 
     Pipeline: SMILES -> RDKit Mol -> 3D embed (ETKDGv3) -> MMFF optimize -> Meeko -> PDBQT
 
-    For metal-containing compounds (chelates, metallocenes, etc.), force field
-    optimization is skipped (MMFF/UFF don't support metals) and OpenBabel is
-    used as a fallback if Meeko preparation fails.
-
     Returns (pdbqt_path, rdkit_mol).
+    Raises ValueError for metal-containing compounds (not supported by Vina).
     """
     os.makedirs(output_dir, exist_ok=True)
 
@@ -199,7 +200,21 @@ def prepare_ligand(smiles, name='ligand', output_dir='/content/acudock_pro'):
     if mol is None:
         raise ValueError(f'Invalid SMILES: {smiles}')
 
-    has_metal = _has_metal_atoms(mol)
+    # AutoDock Vina only supports organic atom types (C, N, O, S, H, F, Cl,
+    # Br, I, P).  Metal atoms (Pt, Ru, Fe, etc.) are not valid AutoDock types
+    # and will crash the docking engine.  Detect early and give a clear error.
+    metal_atoms = _has_metal_atoms(mol)
+    if metal_atoms:
+        unique = sorted(set(metal_atoms))
+        raise ValueError(
+            f'Metal atoms detected: {", ".join(unique)}. '
+            f'AutoDock Vina does not support metal-containing compounds '
+            f'(chelates, metallocenes, coordination complexes). '
+            f'Only organic molecules with C, N, O, S, H, F, Cl, Br, I, P '
+            f'are supported. Consider removing the metal center or using a '
+            f'docking program that supports metals (e.g. GOLD, Glide).'
+        )
+
     mol = Chem.AddHs(mol)
 
     # Generate 3D coordinates
