@@ -590,9 +590,9 @@ def capture_3d_views_matplotlib(protein_pdb, poses_pdbqt, output_dir,
                                  pose_index=0, prefix='pose'):
     """Render protein overview and binding site closeup for PDF reports.
 
-    Produces two images:
-    - overview: full protein backbone with the docked ligand highlighted
-    - binding_site: closeup of nearby residues with potential H-bond contacts
+    Overview uses spectrum-colored ribbon-like backbone (matching py3Dmol
+    cartoon style) with green ligand sticks and translucent surface.
+    Binding site shows nearby residue sticks with H-bond contacts.
 
     Returns dict mapping view name to PNG file path.
     """
@@ -600,10 +600,17 @@ def capture_3d_views_matplotlib(protein_pdb, poses_pdbqt, output_dir,
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
     from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
+    from matplotlib.colors import Normalize
+    from matplotlib import cm
 
-    # Parse protein atoms
-    prot_ca = []       # CA atoms for backbone trace
+    # Parse protein atoms — track chain and residue ordering
+    prot_ca = []       # (x, y, z, res_index) for backbone spline
     prot_residues = {} # (res_name, res_num) -> [(x, y, z, element, atom_name)]
+    chain_breaks = []  # indices where chain breaks occur
+    prev_ca = None
+    res_index = 0
+    seen_residues = set()
+
     with open(protein_pdb, 'r') as f:
         for line in f:
             if not line.startswith('ATOM'):
@@ -615,13 +622,25 @@ def capture_3d_views_matplotlib(protein_pdb, poses_pdbqt, output_dir,
                 atom_name = line[12:16].strip()
                 res_name = line[17:20].strip()
                 res_num = line[22:26].strip()
+                chain_id = line[21] if len(line) > 21 else 'A'
                 elem = line[76:78].strip() if len(line) > 76 else atom_name[0]
             except (ValueError, IndexError):
                 continue
             if elem.upper() == 'H':
                 continue
+
+            res_key = (chain_id, res_name, res_num)
+            if res_key not in seen_residues:
+                seen_residues.add(res_key)
+                res_index += 1
+
             if atom_name == 'CA':
-                prot_ca.append((x, y, z))
+                pos = np.array([x, y, z])
+                if prev_ca is not None and np.linalg.norm(pos - prev_ca) > 5.0:
+                    chain_breaks.append(len(prot_ca))
+                prev_ca = pos
+                prot_ca.append((x, y, z, res_index))
+
             key = (res_name, res_num)
             if key not in prot_residues:
                 prot_residues[key] = []
@@ -655,52 +674,142 @@ def capture_3d_views_matplotlib(protein_pdb, poses_pdbqt, output_dir,
     paths = {}
 
     elem_colors = {
-        'C': '#404040', 'N': '#3050F8', 'O': '#FF0D0D', 'S': '#FFFF30',
+        'C': '#2E7D32', 'N': '#3050F8', 'O': '#FF0D0D', 'S': '#FFFF30',
         'H': '#FFFFFF', 'F': '#90E050', 'CL': '#1FF01F', 'BR': '#A62929',
         'P': '#FF8000', 'I': '#940094',
     }
 
-    def _draw_ligand(ax):
-        """Draw ligand atoms and bonds on a 3D axis."""
-        for i, (x, y, z) in enumerate(lig_coords):
-            elem = lig_elements[i] if i < len(lig_elements) else 'C'
-            color = elem_colors.get(elem, '#FF69B4')
-            ax.scatter(x, y, z, c=color, s=50, edgecolors='black',
-                       linewidths=0.4, zorder=10)
+    def _draw_ligand_sticks(ax, with_surface=False):
+        """Draw ligand as colored sticks (green carbon) matching py3Dmol."""
+        # Draw bonds first (behind atoms)
         for i in range(len(lig_arr)):
             for j in range(i + 1, len(lig_arr)):
-                if np.linalg.norm(lig_arr[i] - lig_arr[j]) < 1.9:
-                    ax.plot([lig_arr[i, 0], lig_arr[j, 0]],
-                            [lig_arr[i, 1], lig_arr[j, 1]],
-                            [lig_arr[i, 2], lig_arr[j, 2]],
-                            color='#2E7D32', linewidth=2.0, zorder=9)
+                d = np.linalg.norm(lig_arr[i] - lig_arr[j])
+                if d < 1.9:
+                    mid = (lig_arr[i] + lig_arr[j]) / 2
+                    ei = lig_elements[i] if i < len(lig_elements) else 'C'
+                    ej = lig_elements[j] if j < len(lig_elements) else 'C'
+                    ci = elem_colors.get(ei, '#2E7D32')
+                    cj = elem_colors.get(ej, '#2E7D32')
+                    ax.plot([lig_arr[i, 0], mid[0]],
+                            [lig_arr[i, 1], mid[1]],
+                            [lig_arr[i, 2], mid[2]],
+                            color=ci, linewidth=3.5, solid_capstyle='round',
+                            zorder=9)
+                    ax.plot([mid[0], lig_arr[j, 0]],
+                            [mid[1], lig_arr[j, 1]],
+                            [mid[2], lig_arr[j, 2]],
+                            color=cj, linewidth=3.5, solid_capstyle='round',
+                            zorder=9)
+        # Draw atom spheres on top
+        for i, (x, y, z) in enumerate(lig_coords):
+            elem = lig_elements[i] if i < len(lig_elements) else 'C'
+            color = elem_colors.get(elem, '#2E7D32')
+            size = 40 if elem == 'C' else 55
+            ax.scatter(x, y, z, c=color, s=size, edgecolors='none',
+                       alpha=0.9, zorder=10, depthshade=True)
 
-    # === View 1: Protein Overview ===
-    fig = plt.figure(figsize=(6, 5), dpi=150)
+        if with_surface:
+            # Draw a translucent green shell around the ligand
+            u = np.linspace(0, 2 * np.pi, 20)
+            v_ang = np.linspace(0, np.pi, 15)
+            for (x, y, z) in lig_coords:
+                r = 1.5
+                xs = x + r * np.outer(np.cos(u), np.sin(v_ang))
+                ys = y + r * np.outer(np.sin(u), np.sin(v_ang))
+                zs = z + r * np.outer(np.ones_like(u), np.cos(v_ang))
+                ax.plot_surface(xs, ys, zs, color='#4CAF50', alpha=0.08,
+                                shade=False, zorder=8)
+
+    def _smooth_spline(coords, n_points=500):
+        """Interpolate CA coordinates with a smooth cubic spline."""
+        try:
+            from scipy.interpolate import make_interp_spline
+            t = np.linspace(0, 1, len(coords))
+            t_new = np.linspace(0, 1, n_points)
+            spline = make_interp_spline(t, coords, k=3)
+            return spline(t_new)
+        except (ImportError, ValueError):
+            return coords
+
+    # === View 1: Protein Overview (ribbon-like with spectrum coloring) ===
+    fig = plt.figure(figsize=(8, 6), dpi=150)
     ax = fig.add_subplot(111, projection='3d')
+    fig.patch.set_facecolor('white')
     ax.set_facecolor('white')
-    ax.view_init(elev=20, azim=45)
 
     if prot_ca:
-        ca_arr = np.array(prot_ca)
-        ax.plot(ca_arr[:, 0], ca_arr[:, 1], ca_arr[:, 2],
-                '-', color='#B0BEC5', linewidth=0.8, alpha=0.6)
+        ca_arr = np.array([(c[0], c[1], c[2]) for c in prot_ca])
+        ca_idx = np.array([c[3] for c in prot_ca], dtype=float)
+        max_idx = ca_idx.max() if ca_idx.max() > 0 else 1.0
 
-    _draw_ligand(ax)
+        # Split by chain breaks and draw each segment
+        segments = []
+        seg_indices = []
+        start = 0
+        for brk in chain_breaks:
+            if brk > start:
+                segments.append(ca_arr[start:brk])
+                seg_indices.append(ca_idx[start:brk])
+            start = brk
+        segments.append(ca_arr[start:])
+        seg_indices.append(ca_idx[start:])
+
+        cmap = cm.get_cmap('rainbow')
+
+        for seg, seg_idx in zip(segments, seg_indices):
+            if len(seg) < 4:
+                # Too few points for spline, draw straight
+                norm_idx = seg_idx / max_idx
+                for k in range(len(seg) - 1):
+                    color = cmap(norm_idx[k])
+                    ax.plot(seg[k:k+2, 0], seg[k:k+2, 1], seg[k:k+2, 2],
+                            color=color, linewidth=4.0, solid_capstyle='round',
+                            alpha=0.85)
+                continue
+
+            # Smooth spline interpolation
+            n_pts = max(len(seg) * 5, 200)
+            smooth = _smooth_spline(seg, n_points=n_pts)
+            # Interpolate residue indices for coloring
+            t_orig = np.linspace(0, 1, len(seg))
+            t_new = np.linspace(0, 1, n_pts)
+            smooth_idx = np.interp(t_new, t_orig, seg_idx)
+            norm = Normalize(vmin=0, vmax=max_idx)
+
+            # Draw as colored segments (thick tube-like line)
+            for k in range(len(smooth) - 1):
+                color = cmap(norm(smooth_idx[k]))
+                ax.plot(smooth[k:k+2, 0], smooth[k:k+2, 1], smooth[k:k+2, 2],
+                        color=color, linewidth=4.5, solid_capstyle='round',
+                        alpha=0.85)
+
+    _draw_ligand_sticks(ax, with_surface=True)
+
+    # Camera: face the ligand from a nice angle
+    ax.view_init(elev=20, azim=-60)
     ax.set_axis_off()
-    ax.set_title('Protein Overview with Docked Ligand',
-                 fontsize=10, fontweight='bold', pad=5)
+    ax.grid(False)
+    ax.xaxis.pane.fill = False
+    ax.yaxis.pane.fill = False
+    ax.zaxis.pane.fill = False
+    ax.xaxis.pane.set_edgecolor('none')
+    ax.yaxis.pane.set_edgecolor('none')
+    ax.zaxis.pane.set_edgecolor('none')
+    ax.set_title('Protein Structure with Docked Ligand',
+                 fontsize=11, fontweight='bold', pad=10)
 
     path = os.path.join(output_dir, f'{prefix}_overview.png')
-    fig.savefig(path, dpi=150, bbox_inches='tight', facecolor='white')
+    fig.savefig(path, dpi=150, bbox_inches='tight', facecolor='white',
+                edgecolor='none')
     plt.close(fig)
     paths['overview'] = path
 
     # === View 2: Binding Site Closeup ===
-    fig = plt.figure(figsize=(6, 5), dpi=150)
+    fig = plt.figure(figsize=(8, 6), dpi=150)
     ax = fig.add_subplot(111, projection='3d')
+    fig.patch.set_facecolor('white')
     ax.set_facecolor('white')
-    ax.view_init(elev=15, azim=60)
 
     # Find residues with any heavy atom within 5A of any ligand atom
     contact_dist = 5.0
@@ -712,16 +821,27 @@ def capture_3d_views_matplotlib(protein_pdb, poses_pdbqt, output_dir,
                 nearby[key] = atoms
                 break
 
-    # Draw nearby residue sticks
+    # Draw nearby residue sticks with element coloring
+    res_elem_colors = {
+        'C': '#90CAF9', 'N': '#3050F8', 'O': '#FF0D0D', 'S': '#FFFF30',
+    }
     for key, atoms in nearby.items():
         coords = np.array([(a[0], a[1], a[2]) for a in atoms])
+        elems = [a[3] for a in atoms]
         for i in range(len(coords)):
             for j in range(i + 1, len(coords)):
                 if np.linalg.norm(coords[i] - coords[j]) < 1.9:
-                    ax.plot([coords[i, 0], coords[j, 0]],
-                            [coords[i, 1], coords[j, 1]],
-                            [coords[i, 2], coords[j, 2]],
-                            color='#90CAF9', linewidth=1.0, alpha=0.7)
+                    mid = (coords[i] + coords[j]) / 2
+                    ci = res_elem_colors.get(elems[i], '#90CAF9')
+                    cj = res_elem_colors.get(elems[j], '#90CAF9')
+                    ax.plot([coords[i, 0], mid[0]],
+                            [coords[i, 1], mid[1]],
+                            [coords[i, 2], mid[2]],
+                            color=ci, linewidth=2.0, alpha=0.8)
+                    ax.plot([mid[0], coords[j, 0]],
+                            [mid[1], coords[j, 1]],
+                            [mid[2], coords[j, 2]],
+                            color=cj, linewidth=2.0, alpha=0.8)
         # Label at CA or centroid
         ca_pos = None
         for (x, y, z, e, a) in atoms:
@@ -732,10 +852,10 @@ def capture_3d_views_matplotlib(protein_pdb, poses_pdbqt, output_dir,
             ca_pos = tuple(coords.mean(axis=0))
         res_name, res_num = key
         ax.text(ca_pos[0], ca_pos[1], ca_pos[2],
-                f'{res_name}{res_num}', fontsize=5, color='#1565C0',
-                ha='center', va='bottom', zorder=5)
+                f'{res_name}{res_num}', fontsize=6, color='#1565C0',
+                fontweight='bold', ha='center', va='bottom', zorder=5)
 
-    _draw_ligand(ax)
+    _draw_ligand_sticks(ax, with_surface=False)
 
     # Draw potential H-bonds (ligand N/O to protein N/O, 2.0-3.5 A)
     polar_lig = [(x, y, z) for (x, y, z), e
@@ -748,8 +868,8 @@ def capture_3d_views_matplotlib(protein_pdb, poses_pdbqt, output_dir,
                 d = np.sqrt((px - lx)**2 + (py - ly)**2 + (pz - lz)**2)
                 if 2.0 < d < 3.5:
                     ax.plot([px, lx], [py, ly], [pz, lz],
-                            ':', color='#F57F17', linewidth=1.5,
-                            alpha=0.8, zorder=8)
+                            ':', color='#F57F17', linewidth=2.0,
+                            alpha=0.9, zorder=8)
 
     lig_range = max(lig_arr.max(axis=0) - lig_arr.min(axis=0)) * 0.7 + 5
     ax.set_xlim(lig_center[0] - lig_range, lig_center[0] + lig_range)
@@ -757,11 +877,19 @@ def capture_3d_views_matplotlib(protein_pdb, poses_pdbqt, output_dir,
     ax.set_zlim(lig_center[2] - lig_range, lig_center[2] + lig_range)
     ax.view_init(elev=15, azim=60)
     ax.set_axis_off()
+    ax.grid(False)
+    ax.xaxis.pane.fill = False
+    ax.yaxis.pane.fill = False
+    ax.zaxis.pane.fill = False
+    ax.xaxis.pane.set_edgecolor('none')
+    ax.yaxis.pane.set_edgecolor('none')
+    ax.zaxis.pane.set_edgecolor('none')
     ax.set_title('Binding Site (yellow dotted = potential H-bonds)',
-                 fontsize=9, fontweight='bold', pad=5)
+                 fontsize=10, fontweight='bold', pad=10)
 
     path = os.path.join(output_dir, f'{prefix}_binding_site.png')
-    fig.savefig(path, dpi=150, bbox_inches='tight', facecolor='white')
+    fig.savefig(path, dpi=150, bbox_inches='tight', facecolor='white',
+                edgecolor='none')
     plt.close(fig)
     paths['binding_site'] = path
 
@@ -772,15 +900,16 @@ def capture_py3dmol_overview(protein_pdb, poses_pdbqt, output_dir,
                              pose_index=0, prefix='pose'):
     """Capture py3Dmol ribbon view as PNG using JavaScript pngURI() in Colab.
 
-    Creates the same spectrum-colored cartoon protein + green ligand sticks +
-    translucent surface that the interactive viewer shows, and captures it as
-    a static PNG image for PDF reports.
+    Creates the same spectrum-colored cartoon protein + green ligand sticks
+    that the interactive viewer shows, and captures it as a static PNG for
+    PDF reports.  The div must be visible (even briefly) so WebGL can render.
 
     Returns path to the saved PNG, or None if JS capture fails.
     """
     try:
         from google.colab import output as colab_output
     except ImportError:
+        print('  Not in Colab — skipping JS capture')
         return None
 
     with open(protein_pdb, 'r') as f:
@@ -792,49 +921,68 @@ def capture_py3dmol_overview(protein_pdb, poses_pdbqt, output_dir,
     prot_b64 = base64.b64encode(protein_data.encode()).decode()
     lig_b64 = base64.b64encode(ligand_data.encode()).decode()
 
+    # The div must be in the visible viewport for WebGL to initialize.
+    # We use opacity:0.01 so it's nearly invisible but still rendered.
     js = f"""
     (async function() {{
-        await new Promise(r => {{
-            if (window.$3Dmol) {{ r(); return; }}
-            var s = document.createElement('script');
-            s.src = 'https://3Dmol.org/build/3Dmol-min.js';
-            s.onload = r;
-            document.head.appendChild(s);
-        }});
+        try {{
+            await new Promise((resolve, reject) => {{
+                if (window.$3Dmol) {{ resolve(); return; }}
+                var s = document.createElement('script');
+                s.src = 'https://3Dmol.org/build/3Dmol-min.js';
+                s.onload = resolve;
+                s.onerror = reject;
+                document.head.appendChild(s);
+            }});
 
-        var div = document.createElement('div');
-        div.style.width = '800px';
-        div.style.height = '600px';
-        div.style.position = 'fixed';
-        div.style.left = '-9999px';
-        document.body.appendChild(div);
+            var div = document.createElement('div');
+            div.style.width = '800px';
+            div.style.height = '600px';
+            div.style.position = 'absolute';
+            div.style.zIndex = '-1';
+            div.style.opacity = '0.01';
+            div.style.pointerEvents = 'none';
+            document.body.appendChild(div);
 
-        var v = $3Dmol.createViewer(div, {{backgroundColor: 'white'}});
-        v.addModel(atob("{prot_b64}"), "pdb");
-        v.setStyle({{model:0}}, {{cartoon:{{color:'spectrum',opacity:0.8}}}});
-        v.addModel(atob("{lig_b64}"), "pdb");
-        v.setStyle({{model:1}}, {{stick:{{colorscheme:'greenCarbon',radius:0.2}}}});
-        v.addSurface($3Dmol.SurfaceType.VDW,
-                     {{opacity:0.25, color:'green'}}, {{model:1}});
-        v.zoomTo({{model:1}});
-        v.zoom(0.7);
-        v.render();
+            var v = $3Dmol.createViewer(div, {{backgroundColor: 'white'}});
+            v.addModel(atob("{prot_b64}"), "pdb");
+            v.setStyle({{model:0}}, {{cartoon:{{color:'spectrum',opacity:0.8}}}});
+            v.addModel(atob("{lig_b64}"), "pdb");
+            v.setStyle({{model:1}}, {{stick:{{colorscheme:'greenCarbon',radius:0.2}}}});
+            v.zoomTo({{model:1}});
+            v.zoom(0.7);
+            v.render();
 
-        await new Promise(r => setTimeout(r, 500));
-        var uri = v.pngURI();
-        document.body.removeChild(div);
-        return uri.split(',')[1];
+            // Wait for WebGL render to complete
+            await new Promise(r => setTimeout(r, 1500));
+            v.render();
+            await new Promise(r => setTimeout(r, 500));
+
+            var uri = v.pngURI();
+            document.body.removeChild(div);
+
+            if (uri && uri.length > 100) {{
+                return uri.split(',')[1];
+            }}
+            return '';
+        }} catch(e) {{
+            return '';
+        }}
     }})()
     """
 
     try:
         result = colab_output.eval_js(js)
-        if result and len(result) > 100:
+        if result and isinstance(result, str) and len(result) > 100:
             png_data = base64.b64decode(result)
-            out_path = os.path.join(output_dir, f'{prefix}_overview.png')
-            with open(out_path, 'wb') as f:
-                f.write(png_data)
-            return out_path
+            # Verify it's actually a valid PNG (starts with PNG header)
+            if png_data[:4] == b'\x89PNG':
+                out_path = os.path.join(output_dir, f'{prefix}_py3dmol_overview.png')
+                with open(out_path, 'wb') as f:
+                    f.write(png_data)
+                return out_path
+            else:
+                print('  JS capture returned invalid PNG data')
     except Exception as e:
         print(f'  JS capture failed: {e}')
 
