@@ -659,6 +659,9 @@ def capture_3d_views_matplotlib(protein_pdb, poses_pdbqt, output_dir,
         ax = fig.add_subplot(111, projection='3d')
         ax.set_facecolor('white')
 
+        # Set view angle FIRST before adding data
+        ax.view_init(elev=elev, azim=azim)
+
         # Draw nearby protein backbone
         if len(prot_arr) > 0:
             dists = np.sqrt(((prot_arr - lig_center) ** 2).sum(axis=1))
@@ -683,10 +686,11 @@ def capture_3d_views_matplotlib(protein_pdb, poses_pdbqt, output_dir,
                             [lig_arr[i, 2], lig_arr[j, 2]],
                             color='#404040', linewidth=1.5)
 
-        ax.view_init(elev=elev, azim=azim)
         ax.set_xlim(lig_center[0] - lig_range, lig_center[0] + lig_range)
         ax.set_ylim(lig_center[1] - lig_range, lig_center[1] + lig_range)
         ax.set_zlim(lig_center[2] - lig_range, lig_center[2] + lig_range)
+        # Re-apply view angle after setting limits (matplotlib can reset it)
+        ax.view_init(elev=elev, azim=azim)
         ax.set_axis_off()
         ax.set_title(name.capitalize(), fontsize=10, pad=-5)
 
@@ -758,42 +762,12 @@ def capture_3d_views_js(protein_pdb_data, ligand_pdb_data):
 
 def capture_3d_views(protein_pdb, poses_pdbqt, output_dir,
                       pose_index=0, prefix='pose'):
-    """Capture 6-axis 3D views, trying JS first, then matplotlib fallback.
+    """Capture 6-axis 3D views using matplotlib.
 
-    Must be called from a notebook cell for JS capture to work.
     Returns dict mapping orientation name to PNG file path.
     """
     os.makedirs(output_dir, exist_ok=True)
 
-    # Try JS capture via Colab
-    try:
-        import json as _json
-        from google.colab import output as colab_output
-
-        with open(protein_pdb, 'r') as f:
-            prot_data = f.read()
-        pose_data = extract_pose_from_pdbqt(poses_pdbqt, pose_index)
-        lig_data = _clean_pdbqt_for_viewer(pose_data)
-
-        js_code = capture_3d_views_js(prot_data, lig_data)
-        result_json = colab_output.eval_js(js_code)
-        captures = _json.loads(result_json)
-
-        paths = {}
-        for name, b64_data in captures.items():
-            img_bytes = base64.b64decode(b64_data)
-            path = os.path.join(output_dir, f'{prefix}_{name}.png')
-            with open(path, 'wb') as f:
-                f.write(img_bytes)
-            paths[name] = path
-
-        if paths:
-            print(f'  Captured {len(paths)} 3D views via 3Dmol.js')
-            return paths
-    except Exception:
-        pass
-
-    # Fallback to matplotlib
     paths = capture_3d_views_matplotlib(
         protein_pdb, poses_pdbqt, output_dir,
         pose_index=pose_index, prefix=prefix
@@ -911,6 +885,64 @@ def visualize_multi_poses(protein_pdb, poses_pdbqt, n_poses=3,
     view.zoomTo({'model': 1})
     view.zoom(0.7)
     return view
+
+
+def display_3d_viewer(view):
+    """Display a py3Dmol view reliably inside ipywidgets Output contexts.
+
+    Uses an iframe with data URI to bypass JavaScript injection issues
+    that occur when py3Dmol runs inside nested Output widgets in Colab.
+    """
+    from IPython.display import display, HTML
+
+    html_content = view._make_html()
+    b64 = base64.b64encode(html_content.encode()).decode()
+    w = getattr(view, 'width', 800)
+    h = getattr(view, 'height', 600)
+    display(HTML(
+        f'<iframe src="data:text/html;base64,{b64}" '
+        f'width="{w + 20}" height="{h + 20}" '
+        f'style="border:1px solid #ddd; border-radius:4px;"></iframe>'
+    ))
+
+
+def create_download_link(file_path, description=None):
+    """Create a Colab-compatible download link using a data URI.
+
+    Works inside ipywidgets Output widgets where FileLink does not.
+    For large files (>10 MB), falls back to google.colab.files.download().
+    """
+    from IPython.display import display, HTML
+
+    filename = os.path.basename(file_path)
+    desc = description or f'Download {filename}'
+
+    file_size = os.path.getsize(file_path)
+    if file_size > 10 * 1024 * 1024:
+        # Large file: use Colab download API
+        try:
+            from google.colab import files
+            files.download(file_path)
+            return
+        except ImportError:
+            pass
+
+    with open(file_path, 'rb') as f:
+        data = base64.b64encode(f.read()).decode()
+
+    ext = os.path.splitext(filename)[1].lower()
+    mime_types = {
+        '.csv': 'text/csv', '.pdf': 'application/pdf',
+        '.png': 'image/png', '.txt': 'text/plain',
+    }
+    mime = mime_types.get(ext, 'application/octet-stream')
+
+    display(HTML(
+        f'<a href="data:{mime};base64,{data}" download="{filename}" '
+        f'style="display:inline-block; padding:8px 16px; background:#1565C0; '
+        f'color:white; text-decoration:none; border-radius:4px; margin:4px 0;">'
+        f'{desc}</a>'
+    ))
 
 
 # ---------------------------------------------------------------------------

@@ -430,9 +430,10 @@ def _make_score_table(results_df, styles):
         return None
 
     score_col = _find_column(results_df,
-                             ['Score', 'Affinity', 'Best_Score', 'score', 'affinity'])
-    rmsd_lb_col = _find_column(results_df, ['RMSD_lb', 'rmsd_lb', 'RMSD_l.b.'])
-    rmsd_ub_col = _find_column(results_df, ['RMSD_ub', 'rmsd_ub', 'RMSD_u.b.'])
+                             ['Vina Score', 'Score', 'Affinity', 'Best_Score',
+                              'Vina_Score', 'score', 'affinity', 'vina_score'])
+    rmsd_lb_col = _find_column(results_df, ['RMSD_lb', 'rmsd_lb', 'RMSD_l.b.', 'RMSD l.b.'])
+    rmsd_ub_col = _find_column(results_df, ['RMSD_ub', 'rmsd_ub', 'RMSD_u.b.', 'RMSD u.b.'])
 
     headers = ['Pose', 'Score (kcal/mol)', 'RMSD l.b.', 'RMSD u.b.',
                'Est. Kd', 'Quality']
@@ -820,7 +821,8 @@ def generate_single_dock_pdf(output_path, protein_id, ligand_name, smiles,
     best_score = None
     if HAS_PANDAS and results_df is not None and not results_df.empty:
         score_col = _find_column(results_df,
-                                 ['Score', 'Affinity', 'Best_Score', 'score'])
+                                 ['Vina Score', 'Score', 'Affinity', 'Best_Score',
+                                  'Vina_Score', 'score', 'affinity', 'vina_score'])
         if score_col:
             best_score = results_df[score_col].min()
 
@@ -858,13 +860,15 @@ def generate_single_dock_pdf(output_path, protein_id, ligand_name, smiles,
         story.append(props_table)
         story.append(Spacer(1, 10))
 
-    # Score table for all poses
+    # Score table for all poses — start on new page
     score_table = _make_score_table(results_df, styles)
     if score_table is not None:
+        story.append(PageBreak())
+        story.append(Spacer(1, 30))
         story.append(Paragraph('Docking Poses', styles['subtitle']))
         story.append(score_table)
 
-    # Page 2: 3D views and interactions (if available)
+    # Page 3: 3D views and interactions (if available)
     has_3d = False
     if image_paths:
         if isinstance(image_paths, dict):
