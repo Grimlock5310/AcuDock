@@ -123,10 +123,73 @@ def pdb_to_pdbqt(pdb_path, output_path=None, is_receptor=True):
 # Ligand Preparation
 # ---------------------------------------------------------------------------
 
+def _has_metal_atoms(mol):
+    """Check if an RDKit molecule contains metal atoms."""
+    metals = {
+        3, 4, 11, 12, 13, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30,
+        31, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 55, 56,
+        57, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83,  # d-block + common
+    }
+    for atom in mol.GetAtoms():
+        if atom.GetAtomicNum() in metals:
+            return True
+    return False
+
+
+def _prepare_ligand_obabel(smiles, pdbqt_path):
+    """Prepare a ligand PDBQT using OpenBabel (fallback for metal compounds).
+
+    OpenBabel handles metal coordination geometry better than RDKit's MMFF/UFF.
+    Returns True on success, False on failure.
+    """
+    import tempfile
+    smi_path = pdbqt_path.replace('.pdbqt', '.smi')
+    with open(smi_path, 'w') as f:
+        f.write(smiles)
+
+    try:
+        # SMILES -> 3D SDF with OpenBabel (handles metals)
+        sdf_path = pdbqt_path.replace('.pdbqt', '.sdf')
+        result = subprocess.run(
+            ['obabel', smi_path, '-O', sdf_path, '--gen3d', '--best'],
+            capture_output=True, text=True, timeout=60
+        )
+        if result.returncode != 0 or not os.path.exists(sdf_path):
+            # Try without --best (faster, less strict)
+            result = subprocess.run(
+                ['obabel', smi_path, '-O', sdf_path, '--gen3d'],
+                capture_output=True, text=True, timeout=60
+            )
+        if result.returncode != 0 or not os.path.exists(sdf_path):
+            return False
+
+        # SDF -> PDBQT
+        result = subprocess.run(
+            ['obabel', sdf_path, '-O', pdbqt_path],
+            capture_output=True, text=True, timeout=30
+        )
+        if result.returncode != 0 or not os.path.exists(pdbqt_path):
+            return False
+
+        # Verify non-empty
+        with open(pdbqt_path, 'r') as f:
+            content = f.read()
+        if 'ATOM' not in content and 'HETATM' not in content:
+            return False
+
+        return True
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return False
+
+
 def prepare_ligand(smiles, name='ligand', output_dir='/content/acudock_pro'):
     """Convert SMILES to 3D structure and PDBQT for docking.
 
     Pipeline: SMILES -> RDKit Mol -> 3D embed (ETKDGv3) -> MMFF optimize -> Meeko -> PDBQT
+
+    For metal-containing compounds (chelates, metallocenes, etc.), force field
+    optimization is skipped (MMFF/UFF don't support metals) and OpenBabel is
+    used as a fallback if Meeko preparation fails.
 
     Returns (pdbqt_path, rdkit_mol).
     """
@@ -136,29 +199,63 @@ def prepare_ligand(smiles, name='ligand', output_dir='/content/acudock_pro'):
     if mol is None:
         raise ValueError(f'Invalid SMILES: {smiles}')
 
+    has_metal = _has_metal_atoms(mol)
     mol = Chem.AddHs(mol)
 
     # Generate 3D coordinates
     params = AllChem.ETKDGv3()
     params.randomSeed = 42
+    if has_metal:
+        # Metals need more lenient embedding — allow coordinate errors
+        params.useRandomCoords = True
+        params.maxIterations = 500
     status = AllChem.EmbedMolecule(mol, params)
     if status != 0:
-        AllChem.EmbedMolecule(mol, AllChem.ETKDG())
+        params2 = AllChem.ETKDG()
+        params2.useRandomCoords = True
+        status = AllChem.EmbedMolecule(mol, params2)
 
-    # Optimize geometry
-    try:
-        AllChem.MMFFOptimizeMolecule(mol, maxIters=2000)
-    except Exception:
-        AllChem.UFFOptimizeMolecule(mol, maxIters=2000)
-
-    # Convert to PDBQT via Meeko
-    preparator = meeko.MoleculePreparation()
-    mol_setup_list = preparator.prepare(mol)
-    pdbqt_string = meeko.PDBQTWriterLegacy.write_string(mol_setup_list[0])
+    # Optimize geometry (skip for metals — MMFF/UFF don't support them)
+    if not has_metal:
+        try:
+            AllChem.MMFFOptimizeMolecule(mol, maxIters=2000)
+        except Exception:
+            try:
+                AllChem.UFFOptimizeMolecule(mol, maxIters=2000)
+            except Exception:
+                pass  # Use unoptimized coordinates
+    else:
+        print(f'  Metal atoms detected — skipping force field optimization')
 
     pdbqt_path = os.path.join(output_dir, f'{name}.pdbqt')
-    with open(pdbqt_path, 'w') as f:
-        f.write(pdbqt_string[0])
+
+    # Convert to PDBQT via Meeko
+    meeko_ok = False
+    try:
+        preparator = meeko.MoleculePreparation()
+        mol_setup_list = preparator.prepare(mol)
+        pdbqt_string = meeko.PDBQTWriterLegacy.write_string(mol_setup_list[0])
+        if pdbqt_string and pdbqt_string[0].strip():
+            with open(pdbqt_path, 'w') as f:
+                f.write(pdbqt_string[0])
+            meeko_ok = True
+    except Exception as e:
+        if has_metal:
+            print(f'  Meeko preparation failed for metal compound: {e}')
+        else:
+            raise
+
+    # Fallback: use OpenBabel for metal compounds or Meeko failures
+    if not meeko_ok:
+        print('  Trying OpenBabel for ligand preparation...')
+        if _prepare_ligand_obabel(smiles, pdbqt_path):
+            print('  OpenBabel preparation succeeded')
+        else:
+            raise ValueError(
+                f'Cannot prepare ligand for docking. '
+                f'{"Metal-containing compounds (chelates) have limited support. " if has_metal else ""}'
+                f'Please check the SMILES string or try a different compound.'
+            )
 
     return pdbqt_path, mol
 

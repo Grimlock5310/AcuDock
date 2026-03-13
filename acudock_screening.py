@@ -129,34 +129,58 @@ class BatchDockingManager:
     def _prepare_ligand_pdbqt(self, smiles, output_path):
         """Prepare a single ligand SMILES into a PDBQT file.
 
+        Handles metal-containing compounds (chelates) by skipping force field
+        optimization and falling back to OpenBabel if Meeko fails.
+
         Returns the output_path on success, None on failure.
         """
         import meeko
+        from acudock_utils import _has_metal_atoms, _prepare_ligand_obabel
 
         mol = Chem.MolFromSmiles(smiles)
         if mol is None:
             return None
 
+        has_metal = _has_metal_atoms(mol)
         mol = Chem.AddHs(mol)
+
         params = AllChem.ETKDGv3()
         params.randomSeed = 42
+        if has_metal:
+            params.useRandomCoords = True
+            params.maxIterations = 500
         status = AllChem.EmbedMolecule(mol, params)
         if status != 0:
-            AllChem.EmbedMolecule(mol, AllChem.ETKDG())
+            params2 = AllChem.ETKDG()
+            params2.useRandomCoords = True
+            AllChem.EmbedMolecule(mol, params2)
+
+        if not has_metal:
+            try:
+                AllChem.MMFFOptimizeMolecule(mol, maxIters=1000)
+            except Exception:
+                try:
+                    AllChem.UFFOptimizeMolecule(mol, maxIters=1000)
+                except Exception:
+                    pass
+        # else: skip FF optimization for metals (MMFF/UFF don't support them)
 
         try:
-            AllChem.MMFFOptimizeMolecule(mol, maxIters=1000)
+            preparator = meeko.MoleculePreparation()
+            mol_setup_list = preparator.prepare(mol)
+            pdbqt_string = meeko.PDBQTWriterLegacy.write_string(mol_setup_list[0])
+            if pdbqt_string and pdbqt_string[0].strip():
+                with open(output_path, 'w') as f:
+                    f.write(pdbqt_string[0])
+                return output_path
         except Exception:
-            AllChem.UFFOptimizeMolecule(mol, maxIters=1000)
+            pass
 
-        preparator = meeko.MoleculePreparation()
-        mol_setup_list = preparator.prepare(mol)
-        pdbqt_string = meeko.PDBQTWriterLegacy.write_string(mol_setup_list[0])
+        # Fallback to OpenBabel for metals / Meeko failures
+        if _prepare_ligand_obabel(smiles, output_path):
+            return output_path
 
-        with open(output_path, 'w') as f:
-            f.write(pdbqt_string[0])
-
-        return output_path
+        return None
 
     def _mol_descriptors(self, smiles, best_score=None):
         """Compute molecular descriptors for a SMILES string.
