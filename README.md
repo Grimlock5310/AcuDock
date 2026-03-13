@@ -391,6 +391,25 @@ If you have a PDB file from AlphaFold or another source, you can upload it direc
    - Hydrogen bond donors < 5
    - Hydrogen bond acceptors < 10
 
+### Molecular Property Glossary
+
+AcuDock reports several molecular properties for each compound. Here is what each one means:
+
+| Property | Full Name | What It Measures | Good Drug Range |
+|----------|-----------|-----------------|-----------------|
+| **MW** | Molecular Weight | Mass of the molecule in Daltons | < 500 Da |
+| **LogP** | Partition Coefficient | How hydrophobic ("greasy") a molecule is. Higher = more fat-soluble, lower = more water-soluble. | -0.4 to 5.6 |
+| **HBD** | Hydrogen Bond Donors | Number of N-H or O-H groups that can donate hydrogen bonds to the protein | ≤ 5 |
+| **HBA** | Hydrogen Bond Acceptors | Number of N or O atoms that can accept hydrogen bonds from the protein | ≤ 10 |
+| **RotBonds** | Rotatable Bonds | Number of freely rotating bonds. More rotatable bonds = more flexible molecule = harder to dock accurately. | ≤ 10 |
+| **TPSA** | Topological Polar Surface Area | Surface area (in Å²) covered by polar atoms (N, O, and their hydrogens). Affects how well a molecule crosses cell membranes. | 20-130 Å² |
+| **QED** | Quantitative Estimate of Drug-likeness | A single number (0-1) combining multiple drug-likeness properties. Higher = more drug-like. A QED of 0.9 means the molecule looks like a typical approved drug. | > 0.5 |
+| **SA Score** | Synthetic Accessibility Score | How easy it would be to synthesize this molecule in a chemistry lab (1-10). Lower = easier to make. | 1-4 (easy) |
+| **PAINS** | Pan-Assay Interference Compounds | Count of chemical substructures known to give false positives in lab assays. PAINS alerts do not necessarily mean the molecule is bad, but they warrant extra scrutiny. | 0 (ideally) |
+| **LE** | Ligand Efficiency | Binding energy per heavy (non-hydrogen) atom: LE = -Score / num_heavy_atoms. Measures how efficiently the molecule uses its atoms for binding. | > 0.3 |
+| **LLE** | Lipophilic Ligand Efficiency | LLE = pKd - LogP. Measures binding efficiency relative to hydrophobicity. Higher is better — it means the molecule binds through specific interactions, not just greasiness. | > 5 |
+| **Est. Kd** | Estimated Dissociation Constant | Predicted binding affinity converted from the docking score using thermodynamics (Kd = e^(ΔG/RT)). Lower Kd = tighter binding. Expressed in nanomolar (nM), micromolar (µM), or millimolar (mM). | < 1 µM |
+
 ### What NOT to Conclude
 
 - A good docking score does **not** mean the molecule is a drug. It means it might bind to the target.
