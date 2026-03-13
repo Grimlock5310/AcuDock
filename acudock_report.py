@@ -441,9 +441,18 @@ def _make_score_table(results_df, styles):
 
     for idx, (i, row) in enumerate(results_df.iterrows()):
         pose_num = idx + 1
-        score_val = row.get(score_col) if score_col else None
-        rmsd_lb = row.get(rmsd_lb_col) if rmsd_lb_col else None
-        rmsd_ub = row.get(rmsd_ub_col) if rmsd_ub_col else None
+        try:
+            score_val = row[score_col] if score_col else None
+        except (KeyError, TypeError):
+            score_val = None
+        try:
+            rmsd_lb = row[rmsd_lb_col] if rmsd_lb_col else None
+        except (KeyError, TypeError):
+            rmsd_lb = None
+        try:
+            rmsd_ub = row[rmsd_ub_col] if rmsd_ub_col else None
+        except (KeyError, TypeError):
+            rmsd_ub = None
 
         score_str = f'{float(score_val):.2f}' if score_val is not None and not _is_nan(score_val) else 'N/A'
         rmsd_lb_str = f'{float(rmsd_lb):.2f}' if rmsd_lb is not None and not _is_nan(rmsd_lb) else '-'
@@ -488,16 +497,14 @@ def _make_score_table(results_df, styles):
 
 
 def _add_3d_views_grid(story, image_paths, styles):
-    """Add a 2x3 grid of 3D view images to the story.
+    """Add 3D binding pose images to the story.
 
-    Supports both dict (label -> path) and list inputs. Images that do
-    not exist on disk are silently skipped.
+    Displays images stacked vertically at a larger size for clarity.
+    Supports both dict (label -> path) and list inputs.
 
     Args:
         story: List of reportlab flowables to append to.
-        image_paths: Dict or list of image paths. If dict, keys are used as
-                     labels. If list, default labels (Front, Back, Top,
-                     Bottom, Left, Right) are used.
+        image_paths: Dict or list of image paths.
         styles: Style dict from _get_styles().
     """
     if not image_paths:
@@ -507,64 +514,30 @@ def _add_3d_views_grid(story, image_paths, styles):
 
     # Normalize to list of (label, path) tuples
     if isinstance(image_paths, dict):
-        items = list(image_paths.items())
+        label_map = {
+            'overview': 'Protein Overview with Docked Ligand',
+            'binding_site': 'Binding Site Closeup',
+        }
+        items = [(label_map.get(k, k.replace('_', ' ').title()), v)
+                 for k, v in image_paths.items()]
     elif isinstance(image_paths, (list, tuple)):
-        default_labels = ['Front', 'Back', 'Top', 'Bottom', 'Left', 'Right']
-        items = []
-        for i, path in enumerate(image_paths):
-            label = default_labels[i] if i < len(default_labels) else f'View {i+1}'
-            items.append((label, path))
+        items = [(f'View {i+1}', p) for i, p in enumerate(image_paths)]
     else:
         return
 
-    # Filter to existing files
     valid_items = [(label, path) for label, path in items
                    if path and os.path.isfile(str(path))]
     if not valid_items:
         story.append(Paragraph('(3D view images not available)', styles['small']))
         return
 
-    cell_width = 170
-    img_width = 160
-    img_height = 110
-
-    rows = []
-    current_row = []
     for label, path in valid_items:
-        cell_content = []
         try:
-            img = Image(str(path), width=img_width, height=img_height)
-            cell_content.append(img)
+            img = Image(str(path), width=420, height=310)
+            story.append(img)
         except Exception:
-            cell_content.append(Paragraph('(image error)', styles['small']))
-        cell_content.append(Paragraph(label, styles['cell_center']))
-
-        inner = Table([[c] for c in cell_content], colWidths=[cell_width])
-        inner.setStyle(TableStyle([
-            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-            ('TOPPADDING', (0, 0), (-1, -1), 2),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 2),
-        ]))
-        current_row.append(inner)
-
-        if len(current_row) == 3:
-            rows.append(current_row)
-            current_row = []
-
-    if current_row:
-        while len(current_row) < 3:
-            current_row.append('')
-        rows.append(current_row)
-
-    grid = Table(rows, colWidths=[cell_width] * 3)
-    grid.setStyle(TableStyle([
-        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-        ('BOX', (0, 0), (-1, -1), 0.5, colors.HexColor('#BDBDBD')),
-        ('INNERGRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#E0E0E0')),
-    ]))
-    story.append(grid)
+            story.append(Paragraph('(image error)', styles['small']))
+        story.append(Spacer(1, 4))
 
 
 def _make_interactions_table(interactions_df, styles):

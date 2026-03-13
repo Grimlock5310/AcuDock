@@ -586,28 +586,44 @@ def interaction_fingerprint_to_html(summary_df):
 
 def capture_3d_views_matplotlib(protein_pdb, poses_pdbqt, output_dir,
                                  pose_index=0, prefix='pose'):
-    """Render 6-axis 3D views of a docked pose using matplotlib.
+    """Render protein overview and binding site closeup for PDF reports.
 
-    Creates simple stick-model renderings from +X, -X, +Y, -Y, +Z, -Z.
-    Returns dict mapping orientation name to PNG file path.
+    Produces two images:
+    - overview: full protein backbone with the docked ligand highlighted
+    - binding_site: closeup of nearby residues with potential H-bond contacts
+
+    Returns dict mapping view name to PNG file path.
     """
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
     from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
 
-    # Parse protein atoms (CA only for speed)
-    prot_coords = []
+    # Parse protein atoms
+    prot_ca = []       # CA atoms for backbone trace
+    prot_residues = {} # (res_name, res_num) -> [(x, y, z, element, atom_name)]
     with open(protein_pdb, 'r') as f:
         for line in f:
-            if line.startswith('ATOM') and line[12:16].strip() == 'CA':
-                try:
-                    x = float(line[30:38])
-                    y = float(line[38:46])
-                    z = float(line[46:54])
-                    prot_coords.append((x, y, z))
-                except (ValueError, IndexError):
-                    pass
+            if not line.startswith('ATOM'):
+                continue
+            try:
+                x = float(line[30:38])
+                y = float(line[38:46])
+                z = float(line[46:54])
+                atom_name = line[12:16].strip()
+                res_name = line[17:20].strip()
+                res_num = line[22:26].strip()
+                elem = line[76:78].strip() if len(line) > 76 else atom_name[0]
+            except (ValueError, IndexError):
+                continue
+            if elem.upper() == 'H':
+                continue
+            if atom_name == 'CA':
+                prot_ca.append((x, y, z))
+            key = (res_name, res_num)
+            if key not in prot_residues:
+                prot_residues[key] = []
+            prot_residues[key].append((x, y, z, elem.upper(), atom_name))
 
     # Parse ligand atoms
     pose_data = extract_pose_from_pdbqt(poses_pdbqt, pose_index)
@@ -631,73 +647,121 @@ def capture_3d_views_matplotlib(protein_pdb, poses_pdbqt, output_dir,
     if not lig_coords:
         return {}
 
-    prot_arr = np.array(prot_coords) if prot_coords else np.empty((0, 3))
     lig_arr = np.array(lig_coords)
+    lig_center = lig_arr.mean(axis=0)
+    os.makedirs(output_dir, exist_ok=True)
+    paths = {}
 
     elem_colors = {
-        'C': '#808080', 'N': '#3050F8', 'O': '#FF0D0D', 'S': '#FFFF30',
+        'C': '#404040', 'N': '#3050F8', 'O': '#FF0D0D', 'S': '#FFFF30',
         'H': '#FFFFFF', 'F': '#90E050', 'CL': '#1FF01F', 'BR': '#A62929',
         'P': '#FF8000', 'I': '#940094',
     }
 
-    # 6 orientations: (elevation, azimuth, label)
-    orientations = [
-        (0, 0, 'front'), (0, 180, 'back'),
-        (0, 90, 'right'), (0, -90, 'left'),
-        (90, 0, 'top'), (-90, 0, 'bottom'),
-    ]
-
-    os.makedirs(output_dir, exist_ok=True)
-    paths = {}
-
-    # Center on ligand
-    lig_center = lig_arr.mean(axis=0)
-    lig_range = max(lig_arr.max(axis=0) - lig_arr.min(axis=0)) * 0.7 + 5
-
-    for elev, azim, name in orientations:
-        fig = plt.figure(figsize=(4, 4), dpi=150)
-        ax = fig.add_subplot(111, projection='3d')
-        ax.set_facecolor('white')
-
-        # Set view angle FIRST before adding data
-        ax.view_init(elev=elev, azim=azim)
-
-        # Draw nearby protein backbone
-        if len(prot_arr) > 0:
-            dists = np.sqrt(((prot_arr - lig_center) ** 2).sum(axis=1))
-            nearby = prot_arr[dists < 15]
-            if len(nearby) > 1:
-                ax.plot(nearby[:, 0], nearby[:, 1], nearby[:, 2],
-                        'o-', color='#cccccc', markersize=1, linewidth=0.5, alpha=0.4)
-
-        # Draw ligand atoms
+    def _draw_ligand(ax):
+        """Draw ligand atoms and bonds on a 3D axis."""
         for i, (x, y, z) in enumerate(lig_coords):
             elem = lig_elements[i] if i < len(lig_elements) else 'C'
             color = elem_colors.get(elem, '#FF69B4')
-            ax.scatter(x, y, z, c=color, s=40, edgecolors='black', linewidths=0.3)
-
-        # Draw ligand bonds (atoms within 1.9A)
+            ax.scatter(x, y, z, c=color, s=50, edgecolors='black',
+                       linewidths=0.4, zorder=10)
         for i in range(len(lig_arr)):
             for j in range(i + 1, len(lig_arr)):
-                dist = np.linalg.norm(lig_arr[i] - lig_arr[j])
-                if dist < 1.9:
+                if np.linalg.norm(lig_arr[i] - lig_arr[j]) < 1.9:
                     ax.plot([lig_arr[i, 0], lig_arr[j, 0]],
                             [lig_arr[i, 1], lig_arr[j, 1]],
                             [lig_arr[i, 2], lig_arr[j, 2]],
-                            color='#404040', linewidth=1.5)
+                            color='#2E7D32', linewidth=2.0, zorder=9)
 
-        ax.set_xlim(lig_center[0] - lig_range, lig_center[0] + lig_range)
-        ax.set_ylim(lig_center[1] - lig_range, lig_center[1] + lig_range)
-        ax.set_zlim(lig_center[2] - lig_range, lig_center[2] + lig_range)
-        # Re-apply view angle after setting limits (matplotlib can reset it)
-        ax.view_init(elev=elev, azim=azim)
-        ax.set_axis_off()
-        ax.set_title(name.capitalize(), fontsize=10, pad=-5)
+    # === View 1: Protein Overview ===
+    fig = plt.figure(figsize=(6, 5), dpi=150)
+    ax = fig.add_subplot(111, projection='3d')
+    ax.set_facecolor('white')
+    ax.view_init(elev=20, azim=45)
 
-        path = os.path.join(output_dir, f'{prefix}_{name}.png')
-        fig.savefig(path, dpi=150, bbox_inches='tight', facecolor='white')
-        plt.close(fig)
-        paths[name] = path
+    if prot_ca:
+        ca_arr = np.array(prot_ca)
+        ax.plot(ca_arr[:, 0], ca_arr[:, 1], ca_arr[:, 2],
+                '-', color='#B0BEC5', linewidth=0.8, alpha=0.6)
+
+    _draw_ligand(ax)
+    ax.set_axis_off()
+    ax.set_title('Protein Overview with Docked Ligand',
+                 fontsize=10, fontweight='bold', pad=5)
+
+    path = os.path.join(output_dir, f'{prefix}_overview.png')
+    fig.savefig(path, dpi=150, bbox_inches='tight', facecolor='white')
+    plt.close(fig)
+    paths['overview'] = path
+
+    # === View 2: Binding Site Closeup ===
+    fig = plt.figure(figsize=(6, 5), dpi=150)
+    ax = fig.add_subplot(111, projection='3d')
+    ax.set_facecolor('white')
+    ax.view_init(elev=15, azim=60)
+
+    # Find residues with any heavy atom within 5A of any ligand atom
+    contact_dist = 5.0
+    nearby = {}
+    for key, atoms in prot_residues.items():
+        for (px, py, pz, pe, pa) in atoms:
+            pv = np.array([px, py, pz])
+            if np.min(np.linalg.norm(lig_arr - pv, axis=1)) < contact_dist:
+                nearby[key] = atoms
+                break
+
+    # Draw nearby residue sticks
+    for key, atoms in nearby.items():
+        coords = np.array([(a[0], a[1], a[2]) for a in atoms])
+        for i in range(len(coords)):
+            for j in range(i + 1, len(coords)):
+                if np.linalg.norm(coords[i] - coords[j]) < 1.9:
+                    ax.plot([coords[i, 0], coords[j, 0]],
+                            [coords[i, 1], coords[j, 1]],
+                            [coords[i, 2], coords[j, 2]],
+                            color='#90CAF9', linewidth=1.0, alpha=0.7)
+        # Label at CA or centroid
+        ca_pos = None
+        for (x, y, z, e, a) in atoms:
+            if a == 'CA':
+                ca_pos = (x, y, z)
+                break
+        if ca_pos is None:
+            ca_pos = tuple(coords.mean(axis=0))
+        res_name, res_num = key
+        ax.text(ca_pos[0], ca_pos[1], ca_pos[2],
+                f'{res_name}{res_num}', fontsize=5, color='#1565C0',
+                ha='center', va='bottom', zorder=5)
+
+    _draw_ligand(ax)
+
+    # Draw potential H-bonds (ligand N/O to protein N/O, 2.0-3.5 A)
+    polar_lig = [(x, y, z) for (x, y, z), e
+                 in zip(lig_coords, lig_elements) if e in ('N', 'O')]
+    for key, atoms in nearby.items():
+        for (px, py, pz, pe, pa) in atoms:
+            if pe not in ('N', 'O'):
+                continue
+            for (lx, ly, lz) in polar_lig:
+                d = np.sqrt((px - lx)**2 + (py - ly)**2 + (pz - lz)**2)
+                if 2.0 < d < 3.5:
+                    ax.plot([px, lx], [py, ly], [pz, lz],
+                            ':', color='#F57F17', linewidth=1.5,
+                            alpha=0.8, zorder=8)
+
+    lig_range = max(lig_arr.max(axis=0) - lig_arr.min(axis=0)) * 0.7 + 5
+    ax.set_xlim(lig_center[0] - lig_range, lig_center[0] + lig_range)
+    ax.set_ylim(lig_center[1] - lig_range, lig_center[1] + lig_range)
+    ax.set_zlim(lig_center[2] - lig_range, lig_center[2] + lig_range)
+    ax.view_init(elev=15, azim=60)
+    ax.set_axis_off()
+    ax.set_title('Binding Site (yellow dotted = potential H-bonds)',
+                 fontsize=9, fontweight='bold', pad=5)
+
+    path = os.path.join(output_dir, f'{prefix}_binding_site.png')
+    fig.savefig(path, dpi=150, bbox_inches='tight', facecolor='white')
+    plt.close(fig)
+    paths['binding_site'] = path
 
     return paths
 
