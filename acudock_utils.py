@@ -220,27 +220,20 @@ def prepare_ligand(smiles, name='ligand', output_dir='/content/acudock_pro'):
     # Generate 3D coordinates
     params = AllChem.ETKDGv3()
     params.randomSeed = 42
-    if has_metal:
-        # Metals need more lenient embedding — allow coordinate errors
-        params.useRandomCoords = True
-        params.maxIterations = 500
     status = AllChem.EmbedMolecule(mol, params)
     if status != 0:
         params2 = AllChem.ETKDG()
         params2.useRandomCoords = True
         status = AllChem.EmbedMolecule(mol, params2)
 
-    # Optimize geometry (skip for metals — MMFF/UFF don't support them)
-    if not has_metal:
+    # Optimize geometry
+    try:
+        AllChem.MMFFOptimizeMolecule(mol, maxIters=2000)
+    except Exception:
         try:
-            AllChem.MMFFOptimizeMolecule(mol, maxIters=2000)
+            AllChem.UFFOptimizeMolecule(mol, maxIters=2000)
         except Exception:
-            try:
-                AllChem.UFFOptimizeMolecule(mol, maxIters=2000)
-            except Exception:
-                pass  # Use unoptimized coordinates
-    else:
-        print(f'  Metal atoms detected — skipping force field optimization')
+            pass  # Use unoptimized coordinates
 
     pdbqt_path = os.path.join(output_dir, f'{name}.pdbqt')
 
@@ -254,11 +247,8 @@ def prepare_ligand(smiles, name='ligand', output_dir='/content/acudock_pro'):
             with open(pdbqt_path, 'w') as f:
                 f.write(pdbqt_string[0])
             meeko_ok = True
-    except Exception as e:
-        if has_metal:
-            print(f'  Meeko preparation failed for metal compound: {e}')
-        else:
-            raise
+    except Exception:
+        raise
 
     # Fallback: use OpenBabel for metal compounds or Meeko failures
     if not meeko_ok:
