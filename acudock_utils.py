@@ -1016,20 +1016,41 @@ def capture_3d_views_matplotlib(protein_pdb, poses_pdbqt, output_dir,
         ax.zaxis.pane.set_edgecolor('none')
 
     # Three-panel figure: front, rotated 90, top-down — stacked vertically
+    # Each panel is a separate full-width figure saved individually, then
+    # combined into one tall image so each view fills the page.
     angles = [
         (15, 60, 'Front View'),
         (15, 150, 'Side View (90\u00b0)'),
         (75, 60, 'Top-Down View'),
     ]
-    fig = plt.figure(figsize=(10, 24), dpi=150)
-    fig.patch.set_facecolor('white')
-    for idx, (elev, azim, title) in enumerate(angles):
-        ax = fig.add_subplot(3, 1, idx + 1, projection='3d')
-        ax.set_facecolor('white')
-        _draw_binding_site(ax, elev, azim, show_labels=True)
-        ax.set_title(title, fontsize=12, fontweight='bold', pad=10)
+    panel_images = []
+    for elev, azim, title in angles:
+        pfig = plt.figure(figsize=(10, 9), dpi=150)
+        pfig.patch.set_facecolor('white')
+        pax = pfig.add_subplot(111, projection='3d')
+        pax.set_facecolor('white')
+        _draw_binding_site(pax, elev, azim, show_labels=True)
+        pax.set_title(title, fontsize=13, fontweight='bold', pad=12)
+        buf = io.BytesIO()
+        pfig.savefig(buf, format='png', dpi=150, bbox_inches='tight',
+                     facecolor='white', edgecolor='none', pad_inches=0.1)
+        plt.close(pfig)
+        buf.seek(0)
+        panel_images.append(buf)
 
-    # Color legend
+    # Stitch panels vertically with legend at bottom
+    from PIL import Image as _PILImage
+    panels = [_PILImage.open(b) for b in panel_images]
+    total_w = max(p.width for p in panels)
+    # Scale panels to same width
+    scaled = []
+    for p in panels:
+        if p.width != total_w:
+            new_h = int(p.height * total_w / p.width)
+            p = p.resize((total_w, new_h), _PILImage.LANCZOS)
+        scaled.append(p)
+
+    # Create legend bar
     from matplotlib.lines import Line2D
     legend_elements = [
         Line2D([0], [0], color='#2E7D32', linewidth=3, label='Ligand C'),
@@ -1042,18 +1063,51 @@ def capture_3d_views_matplotlib(protein_pdb, poses_pdbqt, output_dir,
         Line2D([0], [0], color='#BDBDBD', linewidth=1, linestyle=':',
                label='Hydrophobic'),
     ]
-    fig.legend(handles=legend_elements, loc='lower center', ncol=4,
-               fontsize=9, frameon=True, fancybox=True, shadow=False,
+    lfig, lax = plt.subplots(figsize=(total_w / 150, 0.5), dpi=150)
+    lfig.patch.set_facecolor('white')
+    lax.set_axis_off()
+    lax.legend(handles=legend_elements, loc='center', ncol=4,
+               fontsize=9, frameon=True, fancybox=True,
                borderpad=0.6, handlelength=2.5)
+    lbuf = io.BytesIO()
+    lfig.savefig(lbuf, format='png', dpi=150, bbox_inches='tight',
+                 facecolor='white', edgecolor='none', pad_inches=0.05)
+    plt.close(lfig)
+    lbuf.seek(0)
+    legend_img = _PILImage.open(lbuf)
+    if legend_img.width != total_w:
+        lh = int(legend_img.height * total_w / legend_img.width)
+        legend_img = legend_img.resize((total_w, lh), _PILImage.LANCZOS)
+    scaled.append(legend_img)
 
-    fig.suptitle('Binding Site \u2014 Multi-Angle View',
-                 fontsize=13, fontweight='bold', y=0.995)
-    fig.subplots_adjust(hspace=0.05, bottom=0.03)
+    # Title bar
+    tfig, tax = plt.subplots(figsize=(total_w / 150, 0.4), dpi=150)
+    tfig.patch.set_facecolor('white')
+    tax.set_axis_off()
+    tax.text(0.5, 0.5, 'Binding Site \u2014 Multi-Angle View',
+             fontsize=14, fontweight='bold', ha='center', va='center',
+             transform=tax.transAxes)
+    tbuf = io.BytesIO()
+    tfig.savefig(tbuf, format='png', dpi=150, bbox_inches='tight',
+                 facecolor='white', edgecolor='none', pad_inches=0.05)
+    plt.close(tfig)
+    tbuf.seek(0)
+    title_img = _PILImage.open(tbuf)
+    if title_img.width != total_w:
+        th = int(title_img.height * total_w / title_img.width)
+        title_img = title_img.resize((total_w, th), _PILImage.LANCZOS)
+
+    total_h = title_img.height + sum(s.height for s in scaled)
+    combined = _PILImage.new('RGB', (total_w, total_h), (255, 255, 255))
+    y_off = 0
+    combined.paste(title_img, (0, y_off))
+    y_off += title_img.height
+    for s in scaled:
+        combined.paste(s, (0, y_off))
+        y_off += s.height
 
     path = os.path.join(output_dir, f'{prefix}_binding_site.png')
-    fig.savefig(path, dpi=150, bbox_inches='tight', facecolor='white',
-                edgecolor='none')
-    plt.close(fig)
+    combined.save(path, dpi=(150, 150))
     paths['binding_site'] = path
 
     return paths
