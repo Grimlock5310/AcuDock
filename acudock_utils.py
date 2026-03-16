@@ -124,16 +124,20 @@ def pdb_to_pdbqt(pdb_path, output_path=None, is_receptor=True):
 # ---------------------------------------------------------------------------
 
 def _has_metal_atoms(mol):
-    """Check if an RDKit molecule contains metal atoms."""
+    """Check if an RDKit molecule contains metal atoms.
+
+    Returns a list of metal element symbols found, or empty list if none.
+    """
     metals = {
         3, 4, 11, 12, 13, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30,
         31, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 55, 56,
         57, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83,  # d-block + common
     }
+    found = []
     for atom in mol.GetAtoms():
         if atom.GetAtomicNum() in metals:
-            return True
-    return False
+            found.append(atom.GetSymbol())
+    return found
 
 
 def _prepare_ligand_obabel(smiles, pdbqt_path):
@@ -187,11 +191,8 @@ def prepare_ligand(smiles, name='ligand', output_dir='/content/acudock_pro'):
 
     Pipeline: SMILES -> RDKit Mol -> 3D embed (ETKDGv3) -> MMFF optimize -> Meeko -> PDBQT
 
-    For metal-containing compounds (chelates, metallocenes, etc.), force field
-    optimization is skipped (MMFF/UFF don't support metals) and OpenBabel is
-    used as a fallback if Meeko preparation fails.
-
     Returns (pdbqt_path, rdkit_mol).
+    Raises ValueError for metal-containing compounds (not supported by Vina).
     """
     os.makedirs(output_dir, exist_ok=True)
 
@@ -199,7 +200,21 @@ def prepare_ligand(smiles, name='ligand', output_dir='/content/acudock_pro'):
     if mol is None:
         raise ValueError(f'Invalid SMILES: {smiles}')
 
-    has_metal = _has_metal_atoms(mol)
+    # AutoDock Vina only supports organic atom types (C, N, O, S, H, F, Cl,
+    # Br, I, P).  Metal atoms (Pt, Ru, Fe, etc.) are not valid AutoDock types
+    # and will crash the docking engine.  Detect early and give a clear error.
+    metal_atoms = _has_metal_atoms(mol)
+    if metal_atoms:
+        unique = sorted(set(metal_atoms))
+        raise ValueError(
+            f'Metal atoms detected: {", ".join(unique)}. '
+            f'AutoDock Vina does not support metal-containing compounds '
+            f'(chelates, metallocenes, coordination complexes). '
+            f'Only organic molecules with C, N, O, S, H, F, Cl, Br, I, P '
+            f'are supported. Consider removing the metal center or using a '
+            f'docking program that supports metals (e.g. GOLD, Glide).'
+        )
+
     mol = Chem.AddHs(mol)
 
     # Generate 3D coordinates
@@ -830,7 +845,7 @@ def capture_3d_views_matplotlib(protein_pdb, poses_pdbqt, output_dir,
             return coords
 
     # === View 1: Protein Overview (ribbon-like with spectrum coloring) ===
-    fig = plt.figure(figsize=(8, 6), dpi=150)
+    fig = plt.figure(figsize=(10, 8), dpi=150)
     ax = fig.add_subplot(111, projection='3d')
     fig.patch.set_facecolor('white')
     ax.set_facecolor('white')
@@ -902,12 +917,7 @@ def capture_3d_views_matplotlib(protein_pdb, poses_pdbqt, output_dir,
     plt.close(fig)
     paths['overview'] = path
 
-    # === View 2: Binding Site Closeup ===
-    fig = plt.figure(figsize=(8, 6), dpi=150)
-    ax = fig.add_subplot(111, projection='3d')
-    fig.patch.set_facecolor('white')
-    ax.set_facecolor('white')
-
+    # === View 2: Binding Site Multi-Angle Panel ===
     # Find residues with any heavy atom within 5A of any ligand atom
     contact_dist = 5.0
     nearby = {}
@@ -918,71 +928,138 @@ def capture_3d_views_matplotlib(protein_pdb, poses_pdbqt, output_dir,
                 nearby[key] = atoms
                 break
 
-    # Draw nearby residue sticks with element coloring
+    # Pre-compute H-bonds and hydrophobic contacts
+    polar = ('N', 'O')
+    polar_lig = [(x, y, z) for (x, y, z), e
+                 in zip(lig_coords, lig_elements) if e in polar]
+    carbon_lig = [(x, y, z) for (x, y, z), e
+                  in zip(lig_coords, lig_elements) if e == 'C']
+    hbond_pairs = []   # (prot_xyz, lig_xyz, distance)
+    hydro_pairs = []   # (prot_xyz, lig_xyz, distance)
+    for key, atoms in nearby.items():
+        for (px, py, pz, pe, pa) in atoms:
+            if pe in polar:
+                for (lx, ly, lz) in polar_lig:
+                    d = np.sqrt((px - lx)**2 + (py - ly)**2 + (pz - lz)**2)
+                    if 2.0 < d < 3.5:
+                        hbond_pairs.append(((px, py, pz), (lx, ly, lz), d))
+            if pe == 'C':
+                for (lx, ly, lz) in carbon_lig:
+                    d = np.sqrt((px - lx)**2 + (py - ly)**2 + (pz - lz)**2)
+                    if 2.0 < d < 4.0:
+                        hydro_pairs.append(((px, py, pz), (lx, ly, lz), d))
+
     res_elem_colors = {
         'C': '#90CAF9', 'N': '#3050F8', 'O': '#FF0D0D', 'S': '#FFFF30',
     }
-    for key, atoms in nearby.items():
-        coords = np.array([(a[0], a[1], a[2]) for a in atoms])
-        elems = [a[3] for a in atoms]
-        for i in range(len(coords)):
-            for j in range(i + 1, len(coords)):
-                if np.linalg.norm(coords[i] - coords[j]) < 1.9:
-                    mid = (coords[i] + coords[j]) / 2
-                    ci = res_elem_colors.get(elems[i], '#90CAF9')
-                    cj = res_elem_colors.get(elems[j], '#90CAF9')
-                    ax.plot([coords[i, 0], mid[0]],
-                            [coords[i, 1], mid[1]],
-                            [coords[i, 2], mid[2]],
-                            color=ci, linewidth=2.0, alpha=0.8)
-                    ax.plot([mid[0], coords[j, 0]],
-                            [mid[1], coords[j, 1]],
-                            [mid[2], coords[j, 2]],
-                            color=cj, linewidth=2.0, alpha=0.8)
-        # Label at CA or centroid
-        ca_pos = None
-        for (x, y, z, e, a) in atoms:
-            if a == 'CA':
-                ca_pos = (x, y, z)
-                break
-        if ca_pos is None:
-            ca_pos = tuple(coords.mean(axis=0))
-        res_name, res_num = key
-        ax.text(ca_pos[0], ca_pos[1], ca_pos[2],
-                f'{res_name}{res_num}', fontsize=6, color='#1565C0',
-                fontweight='bold', ha='center', va='bottom', zorder=5)
 
-    _draw_ligand_sticks(ax, with_surface=False)
+    def _draw_binding_site(ax, view_elev, view_azim, show_labels=True):
+        """Draw the binding site on the given axes."""
+        # Nearby residue sticks
+        for key, atoms in nearby.items():
+            coords_r = np.array([(a[0], a[1], a[2]) for a in atoms])
+            elems = [a[3] for a in atoms]
+            for i in range(len(coords_r)):
+                for j in range(i + 1, len(coords_r)):
+                    if np.linalg.norm(coords_r[i] - coords_r[j]) < 1.9:
+                        mid = (coords_r[i] + coords_r[j]) / 2
+                        ci = res_elem_colors.get(elems[i], '#90CAF9')
+                        cj = res_elem_colors.get(elems[j], '#90CAF9')
+                        ax.plot([coords_r[i, 0], mid[0]],
+                                [coords_r[i, 1], mid[1]],
+                                [coords_r[i, 2], mid[2]],
+                                color=ci, linewidth=2.0, alpha=0.8)
+                        ax.plot([mid[0], coords_r[j, 0]],
+                                [mid[1], coords_r[j, 1]],
+                                [mid[2], coords_r[j, 2]],
+                                color=cj, linewidth=2.0, alpha=0.8)
+            if show_labels:
+                ca_pos = None
+                for (x, y, z, e, a) in atoms:
+                    if a == 'CA':
+                        ca_pos = (x, y, z)
+                        break
+                if ca_pos is None:
+                    ca_pos = tuple(coords_r.mean(axis=0))
+                res_name, res_num = key
+                ax.text(ca_pos[0], ca_pos[1], ca_pos[2],
+                        f'{res_name}{res_num}', fontsize=6, color='#1565C0',
+                        fontweight='bold', ha='center', va='bottom', zorder=5)
 
-    # Draw potential H-bonds (ligand N/O to protein N/O, 2.0-3.5 A)
-    polar_lig = [(x, y, z) for (x, y, z), e
-                 in zip(lig_coords, lig_elements) if e in ('N', 'O')]
-    for key, atoms in nearby.items():
-        for (px, py, pz, pe, pa) in atoms:
-            if pe not in ('N', 'O'):
-                continue
-            for (lx, ly, lz) in polar_lig:
-                d = np.sqrt((px - lx)**2 + (py - ly)**2 + (pz - lz)**2)
-                if 2.0 < d < 3.5:
-                    ax.plot([px, lx], [py, ly], [pz, lz],
-                            ':', color='#F57F17', linewidth=2.0,
-                            alpha=0.9, zorder=8)
+        _draw_ligand_sticks(ax, with_surface=False)
 
-    lig_range = max(lig_arr.max(axis=0) - lig_arr.min(axis=0)) * 0.7 + 5
-    ax.set_xlim(lig_center[0] - lig_range, lig_center[0] + lig_range)
-    ax.set_ylim(lig_center[1] - lig_range, lig_center[1] + lig_range)
-    ax.set_zlim(lig_center[2] - lig_range, lig_center[2] + lig_range)
-    ax.view_init(elev=15, azim=60)
-    ax.set_axis_off()
-    ax.grid(False)
-    ax.xaxis.pane.fill = False
-    ax.yaxis.pane.fill = False
-    ax.zaxis.pane.fill = False
-    ax.xaxis.pane.set_edgecolor('none')
-    ax.yaxis.pane.set_edgecolor('none')
-    ax.zaxis.pane.set_edgecolor('none')
-    ax.set_title('Binding Site (yellow dotted = potential H-bonds)',
-                 fontsize=10, fontweight='bold', pad=10)
+        # H-bonds with distance labels
+        for (p_xyz, l_xyz, d) in hbond_pairs:
+            ax.plot([p_xyz[0], l_xyz[0]], [p_xyz[1], l_xyz[1]],
+                    [p_xyz[2], l_xyz[2]],
+                    ':', color='#F57F17', linewidth=2.5, alpha=0.9, zorder=8)
+            if show_labels:
+                mx = (p_xyz[0] + l_xyz[0]) / 2
+                my = (p_xyz[1] + l_xyz[1]) / 2
+                mz = (p_xyz[2] + l_xyz[2]) / 2
+                ax.text(mx, my, mz, f'{d:.1f}A', fontsize=5,
+                        color='#E65100', ha='center', va='center',
+                        fontweight='bold', zorder=12,
+                        bbox=dict(boxstyle='round,pad=0.15',
+                                  facecolor='white', alpha=0.8,
+                                  edgecolor='none'))
+
+        # Hydrophobic contacts (thin gray)
+        for (p_xyz, l_xyz, d) in hydro_pairs:
+            ax.plot([p_xyz[0], l_xyz[0]], [p_xyz[1], l_xyz[1]],
+                    [p_xyz[2], l_xyz[2]],
+                    ':', color='#BDBDBD', linewidth=1.0, alpha=0.6, zorder=7)
+
+        # Set view limits around ligand
+        lig_range_v = max(lig_arr.max(axis=0) - lig_arr.min(axis=0)) * 0.7 + 5
+        ax.set_xlim(lig_center[0] - lig_range_v, lig_center[0] + lig_range_v)
+        ax.set_ylim(lig_center[1] - lig_range_v, lig_center[1] + lig_range_v)
+        ax.set_zlim(lig_center[2] - lig_range_v, lig_center[2] + lig_range_v)
+        ax.view_init(elev=view_elev, azim=view_azim)
+        ax.set_axis_off()
+        ax.grid(False)
+        ax.xaxis.pane.fill = False
+        ax.yaxis.pane.fill = False
+        ax.zaxis.pane.fill = False
+        ax.xaxis.pane.set_edgecolor('none')
+        ax.yaxis.pane.set_edgecolor('none')
+        ax.zaxis.pane.set_edgecolor('none')
+
+    # Three-panel figure: front, rotated 90, top-down
+    angles = [
+        (15, 60, 'Front View'),
+        (15, 150, 'Side View (90\u00b0)'),
+        (75, 60, 'Top-Down View'),
+    ]
+    fig = plt.figure(figsize=(18, 6), dpi=150)
+    fig.patch.set_facecolor('white')
+    for idx, (elev, azim, title) in enumerate(angles):
+        ax = fig.add_subplot(1, 3, idx + 1, projection='3d')
+        ax.set_facecolor('white')
+        _draw_binding_site(ax, elev, azim, show_labels=(idx == 0))
+        ax.set_title(title, fontsize=10, fontweight='bold', pad=8)
+
+    # Color legend
+    from matplotlib.lines import Line2D
+    legend_elements = [
+        Line2D([0], [0], color='#2E7D32', linewidth=3, label='Ligand C'),
+        Line2D([0], [0], color='#3050F8', linewidth=3, label='N'),
+        Line2D([0], [0], color='#FF0D0D', linewidth=3, label='O'),
+        Line2D([0], [0], color='#FFFF30', linewidth=3, label='S'),
+        Line2D([0], [0], color='#90CAF9', linewidth=2, label='Protein C'),
+        Line2D([0], [0], color='#F57F17', linewidth=2, linestyle=':',
+               label='H-bond'),
+        Line2D([0], [0], color='#BDBDBD', linewidth=1, linestyle=':',
+               label='Hydrophobic'),
+    ]
+    fig.legend(handles=legend_elements, loc='lower center', ncol=7,
+               fontsize=8, frameon=True, fancybox=True, shadow=False,
+               borderpad=0.5, handlelength=2.0)
+
+    fig.suptitle('Binding Site — Multi-Angle View '
+                 '(yellow dotted = H-bonds, gray dotted = hydrophobic)',
+                 fontsize=11, fontweight='bold', y=1.02)
+    fig.subplots_adjust(bottom=0.08)
 
     path = os.path.join(output_dir, f'{prefix}_binding_site.png')
     fig.savefig(path, dpi=150, bbox_inches='tight', facecolor='white',
@@ -1172,9 +1249,168 @@ def _clean_pdbqt_for_viewer(pdbqt_data):
     return '\n'.join(lines)
 
 
+def _parse_pdb_atoms(pdb_data):
+    """Parse PDB data into structured atom records.
+
+    Returns list of dicts with keys: x, y, z, element, atom_name,
+    res_name, res_num, chain_id, record_type.
+    """
+    atoms = []
+    for line in pdb_data.split('\n'):
+        rec = line[:6].strip()
+        if rec not in ('ATOM', 'HETATM'):
+            continue
+        try:
+            x = float(line[30:38])
+            y = float(line[38:46])
+            z = float(line[46:54])
+            atom_name = line[12:16].strip()
+            res_name = line[17:20].strip()
+            res_num = line[22:26].strip()
+            chain_id = line[21] if len(line) > 21 else 'A'
+            elem = line[76:78].strip() if len(line) > 76 else atom_name[0]
+        except (ValueError, IndexError):
+            continue
+        atoms.append({
+            'x': x, 'y': y, 'z': z,
+            'element': elem.upper(),
+            'atom_name': atom_name,
+            'res_name': res_name,
+            'res_num': res_num,
+            'chain_id': chain_id,
+            'record_type': rec,
+        })
+    return atoms
+
+
+def _find_nearby_residues(prot_atoms, lig_coords, cutoff=5.0):
+    """Find protein residues with any heavy atom within *cutoff* A of ligand.
+
+    Args:
+        prot_atoms: List of atom dicts from _parse_pdb_atoms.
+        lig_coords: Nx3 numpy array of ligand coordinates.
+        cutoff: Distance threshold in Angstroms.
+
+    Returns dict {(chain_id, res_name, res_num): [atom_dicts]}.
+    """
+    nearby = {}
+    for atom in prot_atoms:
+        if atom['element'] == 'H' or atom['record_type'] != 'ATOM':
+            continue
+        pos = np.array([atom['x'], atom['y'], atom['z']])
+        if np.min(np.linalg.norm(lig_coords - pos, axis=1)) < cutoff:
+            key = (atom['chain_id'], atom['res_name'], atom['res_num'])
+            if key not in nearby:
+                nearby[key] = []
+            nearby[key].append(atom)
+    return nearby
+
+
+def _detect_hbonds(nearby_residues, lig_coords, lig_elements, min_d=2.0, max_d=3.5):
+    """Detect potential hydrogen bonds between ligand and nearby residues.
+
+    Returns list of dicts: {prot_xyz, lig_xyz, distance, prot_label}.
+    """
+    polar = ('N', 'O')
+    polar_lig = [(c, e) for c, e in zip(lig_coords, lig_elements)
+                 if e in polar]
+    hbonds = []
+    for key, atoms in nearby_residues.items():
+        chain, rname, rnum = key
+        for atom in atoms:
+            if atom['element'] not in polar:
+                continue
+            pa = np.array([atom['x'], atom['y'], atom['z']])
+            for (lc, le) in polar_lig:
+                d = np.linalg.norm(pa - np.array(lc))
+                if min_d < d < max_d:
+                    hbonds.append({
+                        'prot_xyz': (atom['x'], atom['y'], atom['z']),
+                        'lig_xyz': lc,
+                        'distance': round(d, 2),
+                        'prot_label': f"{rname}{rnum}.{atom['atom_name']}",
+                    })
+    return hbonds
+
+
+def _detect_hydrophobic_contacts(nearby_residues, lig_coords, lig_elements,
+                                  max_d=4.0):
+    """Detect hydrophobic C-C contacts between ligand and protein.
+
+    Returns list of dicts: {prot_xyz, lig_xyz, distance}.
+    """
+    carbon_lig = [c for c, e in zip(lig_coords, lig_elements) if e == 'C']
+    contacts = []
+    for key, atoms in nearby_residues.items():
+        for atom in atoms:
+            if atom['element'] != 'C':
+                continue
+            pa = np.array([atom['x'], atom['y'], atom['z']])
+            for lc in carbon_lig:
+                d = np.linalg.norm(pa - np.array(lc))
+                if 2.0 < d < max_d:
+                    contacts.append({
+                        'prot_xyz': (atom['x'], atom['y'], atom['z']),
+                        'lig_xyz': lc,
+                        'distance': round(d, 2),
+                    })
+    return contacts
+
+
+def _get_ligand_coords_and_elements(pdbqt_data):
+    """Extract coordinates and element symbols from cleaned PDBQT/PDB data.
+
+    Returns (list_of_tuples, list_of_elements).
+    """
+    clean = _clean_pdbqt_for_viewer(pdbqt_data)
+    coords = []
+    elements = []
+    for line in clean.split('\n'):
+        if line.startswith(('ATOM', 'HETATM')):
+            try:
+                x = float(line[30:38])
+                y = float(line[38:46])
+                z = float(line[46:54])
+                elem = line[76:78].strip() if len(line) > 76 else line[12:14].strip()
+                if not elem:
+                    elem = line[12:16].strip()[0]
+                coords.append((x, y, z))
+                elements.append(elem.upper())
+            except (ValueError, IndexError):
+                pass
+    return coords, elements
+
+
+def _get_residue_pdb_block(nearby_residues):
+    """Build a PDB-format string for a set of nearby residues.
+
+    This can be loaded as a separate model in py3Dmol to style
+    binding-site residues independently from the full protein.
+    """
+    lines = []
+    serial = 1
+    for (chain, rname, rnum), atoms in nearby_residues.items():
+        for a in atoms:
+            if a['element'] == 'H':
+                continue
+            lines.append(
+                f"ATOM  {serial:5d} {a['atom_name']:4s} {rname:3s} "
+                f"{chain}{rnum:>4s}    "
+                f"{a['x']:8.3f}{a['y']:8.3f}{a['z']:8.3f}"
+                f"  1.00  0.00          {a['element']:>2s}"
+            )
+            serial += 1
+    lines.append('END')
+    return '\n'.join(lines)
+
+
 def visualize_pose(protein_pdb, poses_pdbqt, pose_index=0,
-                   width=800, height=600):
-    """Create a py3Dmol view of a docked pose in the protein.
+                   width=1000, height=700):
+    """Create an enhanced py3Dmol view of a docked pose.
+
+    Shows: protein cartoon, ligand sticks with VDW surface, nearby
+    residue sticks with labels, H-bond dashed lines (yellow),
+    hydrophobic contacts (gray), and binding pocket surface.
 
     Returns a py3Dmol.view object (call .show() to render).
     """
@@ -1185,30 +1421,103 @@ def visualize_pose(protein_pdb, poses_pdbqt, pose_index=0,
     with open(poses_pdbqt, 'r') as f:
         poses_data = f.read()
 
-    # Extract specific pose from multi-model PDBQT
+    # Extract specific pose
     models = poses_data.split('MODEL')
     if len(models) > 1:
         pose_data = 'MODEL' + models[pose_index + 1].split('ENDMDL')[0] + 'ENDMDL'
     else:
         pose_data = poses_data
 
-    view = py3Dmol.view(width=width, height=height)
-    view.addModel(protein_data, 'pdb')
-    view.setStyle({'model': 0}, {'cartoon': {'color': 'spectrum', 'opacity': 0.8}})
+    lig_coords, lig_elements = _get_ligand_coords_and_elements(pose_data)
+    lig_arr = np.array(lig_coords) if lig_coords else np.zeros((1, 3))
 
+    # Analyse contacts
+    prot_atoms = _parse_pdb_atoms(protein_data)
+    nearby = _find_nearby_residues(prot_atoms, lig_arr, cutoff=5.0)
+    hbonds = _detect_hbonds(nearby, lig_coords, lig_elements)
+    hydrophobics = _detect_hydrophobic_contacts(nearby, lig_coords, lig_elements)
+    pocket_pdb = _get_residue_pdb_block(nearby)
+
+    view = py3Dmol.view(width=width, height=height)
+
+    # Model 0 — full protein cartoon
+    view.addModel(protein_data, 'pdb')
+    view.setStyle({'model': 0}, {'cartoon': {'color': 'spectrum', 'opacity': 0.7}})
+
+    # Model 1 — ligand sticks + surface
     view.addModel(_clean_pdbqt_for_viewer(pose_data), 'pdb')
     view.setStyle({'model': 1}, {'stick': {'colorscheme': 'greenCarbon', 'radius': 0.2}})
-    view.addSurface(py3Dmol.VDW, {'opacity': 0.25, 'color': 'green'}, {'model': 1})
+    view.addSurface(py3Dmol.VDW, {'opacity': 0.20, 'color': 'green'}, {'model': 1})
+
+    # Model 2 — binding pocket residues as sticks
+    view.addModel(pocket_pdb, 'pdb')
+    view.setStyle({'model': 2}, {'stick': {'colorscheme': 'whiteCarbon', 'radius': 0.15}})
+    # Translucent pocket surface
+    view.addSurface(py3Dmol.VDW, {'opacity': 0.10, 'color': 'lightblue'}, {'model': 2})
+
+    # Residue labels
+    labeled = set()
+    for (chain, rname, rnum), atoms in nearby.items():
+        label_key = f"{rname}{rnum}"
+        if label_key in labeled:
+            continue
+        labeled.add(label_key)
+        # Use CA position or centroid
+        ca = next((a for a in atoms if a['atom_name'] == 'CA'), None)
+        if ca:
+            lx, ly, lz = ca['x'], ca['y'], ca['z']
+        else:
+            lx = np.mean([a['x'] for a in atoms])
+            ly = np.mean([a['y'] for a in atoms])
+            lz = np.mean([a['z'] for a in atoms])
+        view.addLabel(label_key, {
+            'position': {'x': lx, 'y': ly, 'z': lz},
+            'fontSize': 11,
+            'fontColor': 'black',
+            'backgroundColor': 'white',
+            'backgroundOpacity': 0.7,
+            'borderColor': 'gray',
+            'borderThickness': 1,
+        })
+
+    # H-bond dashed lines (yellow)
+    for hb in hbonds:
+        px, py_, pz = hb['prot_xyz']
+        lx, ly, lz = hb['lig_xyz']
+        view.addLine({
+            'start': {'x': px, 'y': py_, 'z': pz},
+            'end': {'x': lx, 'y': ly, 'z': lz},
+            'color': '#F5B041',
+            'dashed': True,
+            'dashLength': 0.2,
+            'gapLength': 0.1,
+            'linewidth': 3,
+        })
+
+    # Hydrophobic contacts (thin gray dashed)
+    for hc in hydrophobics:
+        px, py_, pz = hc['prot_xyz']
+        lx, ly, lz = hc['lig_xyz']
+        view.addLine({
+            'start': {'x': px, 'y': py_, 'z': pz},
+            'end': {'x': lx, 'y': ly, 'z': lz},
+            'color': '#AAAAAA',
+            'dashed': True,
+            'dashLength': 0.15,
+            'gapLength': 0.15,
+            'linewidth': 1,
+        })
 
     view.zoomTo({'model': 1})
-    view.zoom(0.7)
+    view.zoom(0.8)
     return view
 
 
 def visualize_multi_poses(protein_pdb, poses_pdbqt, n_poses=3,
-                          width=800, height=600):
-    """Overlay multiple poses on the protein structure.
+                          width=1000, height=700):
+    """Overlay multiple poses on the protein with contact analysis.
 
+    Shows nearby residues and H-bonds for the top pose.
     Returns a py3Dmol.view object.
     """
     import py3Dmol
@@ -1218,19 +1527,83 @@ def visualize_multi_poses(protein_pdb, poses_pdbqt, n_poses=3,
     with open(poses_pdbqt, 'r') as f:
         poses_data = f.read()
 
+    all_models = poses_data.split('MODEL')
+    pose_strs = []
+    for i in range(min(n_poses, len(all_models) - 1)):
+        pose_strs.append('MODEL' + all_models[i + 1].split('ENDMDL')[0] + 'ENDMDL')
+
+    # Contact analysis on top pose
+    if pose_strs:
+        lig_coords, lig_elements = _get_ligand_coords_and_elements(pose_strs[0])
+        lig_arr = np.array(lig_coords) if lig_coords else np.zeros((1, 3))
+        prot_atoms = _parse_pdb_atoms(protein_data)
+        nearby = _find_nearby_residues(prot_atoms, lig_arr, cutoff=5.0)
+        hbonds = _detect_hbonds(nearby, lig_coords, lig_elements)
+        pocket_pdb = _get_residue_pdb_block(nearby)
+    else:
+        nearby, hbonds, pocket_pdb = {}, [], ''
+
     view = py3Dmol.view(width=width, height=height)
+
+    # Model 0 — protein cartoon (faded)
     view.addModel(protein_data, 'pdb')
-    view.setStyle({'model': 0}, {'cartoon': {'color': 'white', 'opacity': 0.5}})
+    view.setStyle({'model': 0}, {'cartoon': {'color': 'white', 'opacity': 0.4}})
 
-    colors = ['green', 'cyan', 'magenta', 'orange', 'yellow']
-    models = poses_data.split('MODEL')
-    for i in range(min(n_poses, len(models) - 1)):
-        pose = 'MODEL' + models[i + 1].split('ENDMDL')[0] + 'ENDMDL'
+    # Add pocket residues
+    model_idx = 1
+    if pocket_pdb:
+        view.addModel(pocket_pdb, 'pdb')
+        view.setStyle({'model': model_idx}, {'stick': {'colorscheme': 'whiteCarbon', 'radius': 0.12}})
+        model_idx += 1
+
+    # Add pose models
+    colors = ['#2ECC71', '#00BCD4', '#E91E63', '#FF9800', '#FFEB3B']
+    first_pose_model = model_idx
+    for i, pose in enumerate(pose_strs):
         view.addModel(_clean_pdbqt_for_viewer(pose), 'pdb')
-        view.setStyle({'model': i + 1}, {'stick': {'color': colors[i % len(colors)], 'radius': 0.15}})
+        view.setStyle({'model': model_idx}, {
+            'stick': {'color': colors[i % len(colors)], 'radius': 0.18}
+        })
+        model_idx += 1
 
-    view.zoomTo({'model': 1})
-    view.zoom(0.7)
+    # Residue labels
+    labeled = set()
+    for (chain, rname, rnum), atoms in nearby.items():
+        label_key = f"{rname}{rnum}"
+        if label_key in labeled:
+            continue
+        labeled.add(label_key)
+        ca = next((a for a in atoms if a['atom_name'] == 'CA'), None)
+        if ca:
+            lx, ly, lz = ca['x'], ca['y'], ca['z']
+        else:
+            lx = np.mean([a['x'] for a in atoms])
+            ly = np.mean([a['y'] for a in atoms])
+            lz = np.mean([a['z'] for a in atoms])
+        view.addLabel(label_key, {
+            'position': {'x': lx, 'y': ly, 'z': lz},
+            'fontSize': 10,
+            'fontColor': 'black',
+            'backgroundColor': 'white',
+            'backgroundOpacity': 0.6,
+        })
+
+    # H-bond lines for top pose
+    for hb in hbonds:
+        px, py_, pz = hb['prot_xyz']
+        lx, ly, lz = hb['lig_xyz']
+        view.addLine({
+            'start': {'x': px, 'y': py_, 'z': pz},
+            'end': {'x': lx, 'y': ly, 'z': lz},
+            'color': '#F5B041',
+            'dashed': True,
+            'dashLength': 0.2,
+            'gapLength': 0.1,
+            'linewidth': 2,
+        })
+
+    view.zoomTo({'model': first_pose_model})
+    view.zoom(0.8)
     return view
 
 
@@ -1244,8 +1617,8 @@ def display_3d_viewer(view):
 
     html_content = view._make_html()
     b64 = base64.b64encode(html_content.encode()).decode()
-    w = view.width if isinstance(view.width, (int, float)) else 800
-    h = view.height if isinstance(view.height, (int, float)) else 600
+    w = view.width if isinstance(view.width, (int, float)) else 1000
+    h = view.height if isinstance(view.height, (int, float)) else 700
     display(HTML(
         f'<iframe src="data:text/html;base64,{b64}" '
         f'width="{int(w) + 20}" height="{int(h) + 20}" '
@@ -1548,15 +1921,151 @@ def extract_pose_from_pdbqt(poses_pdbqt_path, pose_index=0):
 # 3D Viewer HTML
 # ---------------------------------------------------------------------------
 
-def make_3d_viewer_html(protein_pdb_data, ligand_data=None,
-                        width='100%', height='500px',
-                        protein_style='cartoon', ligand_style='stick'):
-    """Generate an HTML string with an interactive 3Dmol.js viewer.
+def _wrap_3dmol_iframe(vid, js_block, width, height):
+    """Wrap 3Dmol.js code in a self-contained iframe with controls.
 
-    Uses the 3Dmol.js library loaded from CDN. Data is base64-encoded
-    to avoid escaping issues. Returns a self-contained HTML snippet
-    wrapped in an iframe for use with IPython.display.HTML() or
-    ipywidgets.HTML().
+    Adds spin toggle and preset camera angle buttons below the viewer.
+    """
+    sq = "'"  # single-quote for embedding in f-strings
+    btn = 'style="padding:3px 10px;cursor:pointer;border:1px solid #ccc;border-radius:3px;background:#f5f5f5;"'
+    controls_html = (
+        f'<div style="display:flex;gap:6px;padding:4px 0;font-family:sans-serif;font-size:12px;">'
+        f'<button onclick="window._v_{vid}.spin(window._spin_{vid}=!window._spin_{vid})" '
+        f'{btn}>Spin</button>'
+        f'<button onclick="window._v_{vid}.rotate(90,{sq}y{sq});window._v_{vid}.render()" '
+        f'{btn}>Rotate 90&deg;</button>'
+        f'<button onclick="window._v_{vid}.rotate(90,{sq}x{sq});window._v_{vid}.render()" '
+        f'{btn}>Top View</button>'
+        f'<button onclick="window._v_{vid}.zoomTo();window._v_{vid}.zoom(0.8);window._v_{vid}.render()" '
+        f'{btn}>Reset</button>'
+        f'</div>'
+    )
+
+    inner_html = (
+        '<!DOCTYPE html><html><head>'
+        '<script src="https://3Dmol.org/build/3Dmol-min.js"></script>'
+        '</head><body style="margin:0;padding:4px;">'
+        f'<div id="{vid}" style="width:100%;height:calc(100% - 36px);position:relative;"></div>'
+        f'{controls_html}'
+        f'<script>(function(){{{js_block};window._v_{vid}=v;window._spin_{vid}=false;}})()</script>'
+        '</body></html>'
+    )
+    escaped = inner_html.replace('&', '&amp;').replace('"', '&quot;')
+    return (
+        f'<iframe srcdoc="{escaped}" '
+        f'style="width:{width};height:{height};border:none;" '
+        f'sandbox="allow-scripts allow-same-origin"></iframe>'
+    )
+
+
+def _generate_contact_js(protein_pdb_data, ligand_pdb_data, pocket_model_idx):
+    """Generate 3Dmol.js lines for contacts, labels, and pocket residues.
+
+    Args:
+        protein_pdb_data: Full protein PDB string.
+        ligand_pdb_data: Cleaned ligand PDB string.
+        pocket_model_idx: Model index to assign to the pocket residues.
+
+    Returns (js_lines, next_model_idx) where js_lines is a list of
+    JavaScript strings to append to the viewer setup.
+    """
+    import json as _json
+
+    lig_coords, lig_elements = _get_ligand_coords_and_elements(ligand_pdb_data)
+    if not lig_coords:
+        return [], pocket_model_idx
+
+    lig_arr = np.array(lig_coords)
+    prot_atoms = _parse_pdb_atoms(protein_pdb_data)
+    nearby = _find_nearby_residues(prot_atoms, lig_arr, cutoff=5.0)
+    hbonds = _detect_hbonds(nearby, lig_coords, lig_elements)
+    hydrophobics = _detect_hydrophobic_contacts(nearby, lig_coords, lig_elements)
+    pocket_pdb = _get_residue_pdb_block(nearby)
+
+    js = []
+    midx = pocket_model_idx
+
+    # Add pocket residues model
+    if pocket_pdb:
+        pocket_b64 = base64.b64encode(pocket_pdb.encode()).decode()
+        js.append(f'v.addModel(atob("{pocket_b64}"),"pdb");')
+        js.append(
+            f'v.setStyle({{model:{midx}}},{{stick:{{colorscheme:"whiteCarbon",radius:0.15}}}});'
+        )
+        # Pocket surface
+        js.append(
+            f'v.addSurface($3Dmol.SurfaceType.VDW,'
+            f'{{opacity:0.10,color:"lightblue"}},{{model:{midx}}});'
+        )
+        midx += 1
+
+    # Residue labels
+    labeled = set()
+    for (chain, rname, rnum), atoms in nearby.items():
+        label_key = f"{rname}{rnum}"
+        if label_key in labeled:
+            continue
+        labeled.add(label_key)
+        ca = next((a for a in atoms if a['atom_name'] == 'CA'), None)
+        if ca:
+            lx, ly, lz = ca['x'], ca['y'], ca['z']
+        else:
+            lx = np.mean([a['x'] for a in atoms])
+            ly = np.mean([a['y'] for a in atoms])
+            lz = np.mean([a['z'] for a in atoms])
+        label_opts = _json.dumps({
+            'position': {'x': round(lx, 2), 'y': round(ly, 2), 'z': round(lz, 2)},
+            'fontSize': 11,
+            'fontColor': 'black',
+            'backgroundColor': 'white',
+            'backgroundOpacity': 0.7,
+            'borderColor': 'gray',
+            'borderThickness': 1,
+        })
+        js.append(f'v.addLabel("{label_key}",{label_opts});')
+
+    # H-bond dashed lines (yellow-orange)
+    for hb in hbonds:
+        px, py_, pz = hb['prot_xyz']
+        lx, ly, lz = hb['lig_xyz']
+        line_opts = _json.dumps({
+            'start': {'x': round(px, 2), 'y': round(py_, 2), 'z': round(pz, 2)},
+            'end': {'x': round(lx, 2), 'y': round(ly, 2), 'z': round(lz, 2)},
+            'color': '#F5B041',
+            'dashed': True,
+            'dashLength': 0.2,
+            'gapLength': 0.1,
+            'linewidth': 3,
+        })
+        js.append(f'v.addLine({line_opts});')
+
+    # Hydrophobic contacts (thin gray)
+    for hc in hydrophobics:
+        px, py_, pz = hc['prot_xyz']
+        lx, ly, lz = hc['lig_xyz']
+        line_opts = _json.dumps({
+            'start': {'x': round(px, 2), 'y': round(py_, 2), 'z': round(pz, 2)},
+            'end': {'x': round(lx, 2), 'y': round(ly, 2), 'z': round(lz, 2)},
+            'color': '#AAAAAA',
+            'dashed': True,
+            'dashLength': 0.15,
+            'gapLength': 0.15,
+            'linewidth': 1,
+        })
+        js.append(f'v.addLine({line_opts});')
+
+    return js, midx
+
+
+def make_3d_viewer_html(protein_pdb_data, ligand_data=None,
+                        width='100%', height='600px',
+                        protein_style='cartoon', ligand_style='stick'):
+    """Generate an enhanced HTML string with an interactive 3Dmol.js viewer.
+
+    When ligand data is provided, also shows: binding pocket residue
+    sticks with labels, H-bond dashed lines (yellow-orange), hydrophobic
+    contacts (gray), pocket surface, and control buttons (spin, rotate,
+    top view, reset).
 
     Args:
         protein_pdb_data: Protein PDB file contents as string.
@@ -1579,7 +2088,7 @@ def make_3d_viewer_html(protein_pdb_data, ligand_data=None,
 
     if protein_style == 'cartoon':
         js_lines.append(
-            'v.setStyle({model:0},{cartoon:{color:"spectrum",opacity:0.8}});'
+            'v.setStyle({model:0},{cartoon:{color:"spectrum",opacity:0.7}});'
         )
     else:
         js_lines.append(
@@ -1587,7 +2096,8 @@ def make_3d_viewer_html(protein_pdb_data, ligand_data=None,
         )
 
     if ligand_data:
-        lig_b64 = base64.b64encode(ligand_data.encode()).decode()
+        clean_lig = _clean_pdbqt_for_viewer(ligand_data)
+        lig_b64 = base64.b64encode(clean_lig.encode()).decode()
         js_lines.append(f'v.addModel(atob("{lig_b64}"),"pdb");')
         if ligand_style == 'stick':
             js_lines.append(
@@ -1597,32 +2107,32 @@ def make_3d_viewer_html(protein_pdb_data, ligand_data=None,
             js_lines.append(
                 'v.setStyle({model:1},{sphere:{scale:0.3,colorscheme:"greenCarbon"}});'
             )
-        js_lines.append('v.zoomTo({model:1});v.zoom(0.7);')
+        # Ligand VDW surface
+        js_lines.append(
+            'v.addSurface($3Dmol.SurfaceType.VDW,'
+            '{opacity:0.20,color:"green"},{model:1});'
+        )
+
+        # Contact analysis: pocket residues, labels, H-bonds, hydrophobics
+        contact_js, _ = _generate_contact_js(protein_pdb_data, ligand_data, 2)
+        js_lines.extend(contact_js)
+
+        js_lines.append('v.zoomTo({model:1});v.zoom(0.8);')
     else:
         js_lines.append('v.zoomTo();')
 
     js_lines.append('v.render();')
-
     js_block = '\n'.join(js_lines)
 
-    # Wrap in an iframe srcdoc so 3Dmol.js scripts execute in an
-    # isolated context. Works with IPython.display.HTML() and
-    # ipywidgets.HTML().
-    inner_html = (
-        '<!DOCTYPE html><html><head>'
-        '<script src="https://3Dmol.org/build/3Dmol-min.js"></script>'
-        '</head><body style="margin:0;padding:0;">'
-        f'<div id="{vid}" style="width:100%;height:100%;position:relative;"></div>'
-        f'<script>(function(){{{js_block}}})()</script>'
-        '</body></html>'
-    )
-    escaped = inner_html.replace('&', '&amp;').replace('"', '&quot;')
-    return f'<iframe srcdoc="{escaped}" style="width:{width};height:{height};border:none;" sandbox="allow-scripts allow-same-origin"></iframe>'
+    return _wrap_3dmol_iframe(vid, js_block, width, height)
 
 
 def visualize_poses(protein_pdb_data, poses_pdbqt_data, n_poses=3,
-                    width='100%', height='500px'):
-    """Generate HTML overlaying multiple docked poses on the protein.
+                    width='100%', height='600px'):
+    """Generate enhanced HTML overlaying multiple docked poses on protein.
+
+    Shows pocket residues, labels, and H-bonds based on the top pose.
+    Includes spin/rotate/reset control buttons.
 
     Args:
         protein_pdb_data: Protein PDB file contents.
@@ -1634,38 +2144,44 @@ def visualize_poses(protein_pdb_data, poses_pdbqt_data, n_poses=3,
     vid = 'viewer_' + uuid.uuid4().hex[:8]
     prot_b64 = base64.b64encode(protein_pdb_data.encode()).decode()
 
-    colors = ['green', 'cyan', 'magenta', 'orange', 'yellow']
-    models = poses_pdbqt_data.split('MODEL')
+    colors = ['#2ECC71', '#00BCD4', '#E91E63', '#FF9800', '#FFEB3B']
+    all_models = poses_pdbqt_data.split('MODEL')
 
     js_lines = [
         f'var el=document.getElementById("{vid}");',
         'var v=$3Dmol.createViewer(el,{backgroundColor:"white"});',
         f'v.addModel(atob("{prot_b64}"),"pdb");',
-        'v.setStyle({model:0},{cartoon:{color:"white",opacity:0.5}});',
+        'v.setStyle({model:0},{cartoon:{color:"white",opacity:0.4}});',
     ]
 
-    for i in range(min(n_poses, len(models) - 1)):
-        pose = 'MODEL' + models[i + 1].split('ENDMDL')[0] + 'ENDMDL'
-        pose_b64 = base64.b64encode(pose.encode()).decode()
+    # Contact analysis on top pose — added as model 1
+    pose_strs = []
+    for i in range(min(n_poses, len(all_models) - 1)):
+        pose_strs.append('MODEL' + all_models[i + 1].split('ENDMDL')[0] + 'ENDMDL')
+
+    next_model = 1
+    if pose_strs:
+        contact_js, next_model = _generate_contact_js(
+            protein_pdb_data, pose_strs[0], pocket_model_idx=1
+        )
+        js_lines.extend(contact_js)
+
+    # Add pose models
+    first_pose_model = next_model
+    for i, pose in enumerate(pose_strs):
+        clean = _clean_pdbqt_for_viewer(pose)
+        pose_b64 = base64.b64encode(clean.encode()).decode()
         color = colors[i % len(colors)]
         js_lines.append(f'v.addModel(atob("{pose_b64}"),"pdb");')
         js_lines.append(
-            f'v.setStyle({{model:{i + 1}}},{{stick:{{color:"{color}",radius:0.15}}}});'
+            f'v.setStyle({{model:{next_model}}},{{stick:{{color:"{color}",radius:0.18}}}});'
         )
+        next_model += 1
 
-    js_lines.append('v.zoomTo({model:1});v.zoom(0.7);v.render();')
+    js_lines.append(f'v.zoomTo({{model:{first_pose_model}}});v.zoom(0.8);v.render();')
     js_block = '\n'.join(js_lines)
 
-    inner_html = (
-        '<!DOCTYPE html><html><head>'
-        '<script src="https://3Dmol.org/build/3Dmol-min.js"></script>'
-        '</head><body style="margin:0;padding:0;">'
-        f'<div id="{vid}" style="width:100%;height:100%;position:relative;"></div>'
-        f'<script>(function(){{{js_block}}})()</script>'
-        '</body></html>'
-    )
-    escaped = inner_html.replace('&', '&amp;').replace('"', '&quot;')
-    return f'<iframe srcdoc="{escaped}" style="width:{width};height:{height};border:none;" sandbox="allow-scripts allow-same-origin"></iframe>'
+    return _wrap_3dmol_iframe(vid, js_block, width, height)
 
 
 def get_docking_engine_status():
