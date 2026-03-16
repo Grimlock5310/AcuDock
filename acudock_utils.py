@@ -1187,9 +1187,10 @@ def capture_3d_views(protein_pdb, poses_pdbqt, output_dir,
         # Use matplotlib overview only if JS capture failed
         if 'overview' not in paths and 'overview' in mpl_paths:
             paths['overview'] = mpl_paths['overview']
-        # Always include binding site from matplotlib
-        if 'binding_site' in mpl_paths:
-            paths['binding_site'] = mpl_paths['binding_site']
+        # Include all binding site views from matplotlib
+        for k, v in mpl_paths.items():
+            if k.startswith('binding_'):
+                paths[k] = v
         print(f'  Rendered {len(mpl_paths)} views via matplotlib')
 
     return paths
