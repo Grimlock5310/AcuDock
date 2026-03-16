@@ -517,6 +517,9 @@ def _add_3d_views_grid(story, image_paths, styles):
         label_map = {
             'overview': 'Protein Overview with Docked Ligand',
             'binding_site': 'Binding Site Closeup',
+            'binding_front': 'Binding Site \u2014 Front View',
+            'binding_side': 'Binding Site \u2014 Side View (90\u00b0)',
+            'binding_top': 'Binding Site \u2014 Top-Down View',
         }
         items = [(label_map.get(k, k.replace('_', ' ').title()), v)
                  for k, v in image_paths.items()]
@@ -533,7 +536,18 @@ def _add_3d_views_grid(story, image_paths, styles):
 
     for label, path in valid_items:
         try:
-            img = Image(str(path), width=420, height=310)
+            from PIL import Image as _PILImg
+            pil_img = _PILImg.open(str(path))
+            iw, ih = pil_img.size
+            aspect = ih / iw if iw else 1.0
+            display_w = 460
+            display_h = display_w * aspect
+            # Cap height to avoid overflowing a page (~680 usable pts)
+            max_h = 640
+            if display_h > max_h:
+                display_h = max_h
+                display_w = display_h / aspect
+            img = Image(str(path), width=display_w, height=display_h)
             story.append(img)
         except Exception:
             story.append(Paragraph('(image error)', styles['small']))
