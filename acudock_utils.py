@@ -1015,19 +1015,19 @@ def capture_3d_views_matplotlib(protein_pdb, poses_pdbqt, output_dir,
         ax.yaxis.pane.set_edgecolor('none')
         ax.zaxis.pane.set_edgecolor('none')
 
-    # Three-panel figure: front, rotated 90, top-down
+    # Three-panel figure: front, rotated 90, top-down — stacked vertically
     angles = [
         (15, 60, 'Front View'),
         (15, 150, 'Side View (90\u00b0)'),
         (75, 60, 'Top-Down View'),
     ]
-    fig = plt.figure(figsize=(18, 6), dpi=150)
+    fig = plt.figure(figsize=(10, 24), dpi=150)
     fig.patch.set_facecolor('white')
     for idx, (elev, azim, title) in enumerate(angles):
-        ax = fig.add_subplot(1, 3, idx + 1, projection='3d')
+        ax = fig.add_subplot(3, 1, idx + 1, projection='3d')
         ax.set_facecolor('white')
-        _draw_binding_site(ax, elev, azim, show_labels=(idx == 0))
-        ax.set_title(title, fontsize=10, fontweight='bold', pad=8)
+        _draw_binding_site(ax, elev, azim, show_labels=True)
+        ax.set_title(title, fontsize=12, fontweight='bold', pad=10)
 
     # Color legend
     from matplotlib.lines import Line2D
@@ -1042,14 +1042,13 @@ def capture_3d_views_matplotlib(protein_pdb, poses_pdbqt, output_dir,
         Line2D([0], [0], color='#BDBDBD', linewidth=1, linestyle=':',
                label='Hydrophobic'),
     ]
-    fig.legend(handles=legend_elements, loc='lower center', ncol=7,
-               fontsize=8, frameon=True, fancybox=True, shadow=False,
-               borderpad=0.5, handlelength=2.0)
+    fig.legend(handles=legend_elements, loc='lower center', ncol=4,
+               fontsize=9, frameon=True, fancybox=True, shadow=False,
+               borderpad=0.6, handlelength=2.5)
 
-    fig.suptitle('Binding Site — Multi-Angle View '
-                 '(yellow dotted = H-bonds, gray dotted = hydrophobic)',
-                 fontsize=11, fontweight='bold', y=1.02)
-    fig.subplots_adjust(bottom=0.08)
+    fig.suptitle('Binding Site \u2014 Multi-Angle View',
+                 fontsize=13, fontweight='bold', y=0.995)
+    fig.subplots_adjust(hspace=0.05, bottom=0.03)
 
     path = os.path.join(output_dir, f'{prefix}_binding_site.png')
     fig.savefig(path, dpi=150, bbox_inches='tight', facecolor='white',
@@ -1085,6 +1084,12 @@ def capture_py3dmol_overview(protein_pdb, poses_pdbqt, output_dir,
     prot_b64 = base64.b64encode(protein_data.encode()).decode()
     lig_b64 = base64.b64encode(ligand_data.encode()).decode()
 
+    # Generate contact analysis JS (pocket residues, labels, H-bonds)
+    contact_js_lines, _ = _generate_contact_js(
+        protein_data, pose_data, pocket_model_idx=2
+    )
+    contact_js_block = '\n            '.join(contact_js_lines)
+
     # The div must be in the visible viewport for WebGL to initialize.
     # We use opacity:0.01 so it's nearly invisible but still rendered.
     js = f"""
@@ -1100,8 +1105,8 @@ def capture_py3dmol_overview(protein_pdb, poses_pdbqt, output_dir,
             }});
 
             var div = document.createElement('div');
-            div.style.width = '800px';
-            div.style.height = '600px';
+            div.style.width = '1000px';
+            div.style.height = '700px';
             div.style.position = 'absolute';
             div.style.zIndex = '-1';
             div.style.opacity = '0.01';
@@ -1110,11 +1115,14 @@ def capture_py3dmol_overview(protein_pdb, poses_pdbqt, output_dir,
 
             var v = $3Dmol.createViewer(div, {{backgroundColor: 'white'}});
             v.addModel(atob("{prot_b64}"), "pdb");
-            v.setStyle({{model:0}}, {{cartoon:{{color:'spectrum',opacity:0.8}}}});
+            v.setStyle({{model:0}}, {{cartoon:{{color:'spectrum',opacity:0.7}}}});
             v.addModel(atob("{lig_b64}"), "pdb");
             v.setStyle({{model:1}}, {{stick:{{colorscheme:'greenCarbon',radius:0.2}}}});
+            v.addSurface($3Dmol.SurfaceType.VDW,
+                {{opacity:0.20,color:'green'}},{{model:1}});
+            {contact_js_block}
             v.zoomTo({{model:1}});
-            v.zoom(0.7);
+            v.zoom(0.8);
             v.render();
 
             // Wait for WebGL render to complete
