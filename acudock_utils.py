@@ -1399,13 +1399,51 @@ def _get_residue_pdb_block(nearby_residues):
     return '\n'.join(lines)
 
 
+def _apply_protein_style(view, model_idx, style='ribbon'):
+    """Apply a protein visualization style to a py3Dmol view model.
+
+    Styles:
+        'ribbon'  — spectrum-colored cartoon (default).
+        'goodsell' — space-filling spheres with muted Goodsell palette.
+        'surface' — translucent cartoon with solvent-accessible surface.
+    """
+    import py3Dmol as _p3d
+    if style == 'goodsell':
+        elem_colors = {
+            'C': '#E8DAB2', 'N': '#6FA8DC', 'O': '#E06666',
+            'S': '#F6B26B', 'H': '#CCCCCC',
+        }
+        view.setStyle({'model': model_idx}, {
+            'sphere': {'scale': 0.6, 'colorscheme': {
+                'prop': 'elem', 'map': elem_colors,
+            }}
+        })
+    elif style == 'surface':
+        view.setStyle({'model': model_idx}, {
+            'cartoon': {'color': 'spectrum', 'opacity': 0.3}
+        })
+        view.addSurface(_p3d.SAS, {
+            'opacity': 0.85,
+            'colorscheme': {'prop': 'elem', 'map': {
+                'C': '#F0F0F0', 'N': '#6FA8DC', 'O': '#E06666', 'S': '#F6B26B',
+            }},
+        }, {'model': model_idx})
+    else:  # ribbon (default)
+        view.setStyle({'model': model_idx}, {
+            'cartoon': {'color': 'spectrum', 'opacity': 0.7}
+        })
+
+
 def visualize_pose(protein_pdb, poses_pdbqt, pose_index=0,
-                   width=1000, height=700):
+                   width=1000, height=700, protein_style='ribbon'):
     """Create an enhanced py3Dmol view of a docked pose.
 
     Shows: protein cartoon, ligand sticks with VDW surface, nearby
     residue sticks with labels, H-bond dashed lines (yellow),
     hydrophobic contacts (gray), and binding pocket surface.
+
+    Args:
+        protein_style: 'ribbon' (default), 'goodsell', or 'surface'.
 
     Returns a py3Dmol.view object (call .show() to render).
     """
@@ -1435,9 +1473,9 @@ def visualize_pose(protein_pdb, poses_pdbqt, pose_index=0,
 
     view = py3Dmol.view(width=width, height=height)
 
-    # Model 0 — full protein cartoon
+    # Model 0 — full protein
     view.addModel(protein_data, 'pdb')
-    view.setStyle({'model': 0}, {'cartoon': {'color': 'spectrum', 'opacity': 0.7}})
+    _apply_protein_style(view, 0, protein_style)
 
     # Model 1 — ligand sticks + surface
     view.addModel(_clean_pdbqt_for_viewer(pose_data), 'pdb')
@@ -1509,10 +1547,12 @@ def visualize_pose(protein_pdb, poses_pdbqt, pose_index=0,
 
 
 def visualize_multi_poses(protein_pdb, poses_pdbqt, n_poses=3,
-                          width=1000, height=700):
+                          width=1000, height=700, protein_style='ribbon'):
     """Overlay multiple poses on the protein with contact analysis.
 
     Shows nearby residues and H-bonds for the top pose.
+    Args:
+        protein_style: 'ribbon' (default), 'goodsell', or 'surface'.
     Returns a py3Dmol.view object.
     """
     import py3Dmol
@@ -1540,9 +1580,13 @@ def visualize_multi_poses(protein_pdb, poses_pdbqt, n_poses=3,
 
     view = py3Dmol.view(width=width, height=height)
 
-    # Model 0 — protein cartoon (faded)
+    # Model 0 — protein
     view.addModel(protein_data, 'pdb')
-    view.setStyle({'model': 0}, {'cartoon': {'color': 'white', 'opacity': 0.4}})
+    if protein_style == 'ribbon':
+        # Faded ribbon for multi-pose overlay
+        view.setStyle({'model': 0}, {'cartoon': {'color': 'white', 'opacity': 0.4}})
+    else:
+        _apply_protein_style(view, 0, protein_style)
 
     # Add pocket residues
     model_idx = 1
@@ -1916,15 +1960,55 @@ def extract_pose_from_pdbqt(poses_pdbqt_path, pose_index=0):
 # 3D Viewer HTML
 # ---------------------------------------------------------------------------
 
-def _wrap_3dmol_iframe(vid, js_block, width, height):
+def _wrap_3dmol_iframe(vid, js_block, width, height, style_toggle=False):
     """Wrap 3Dmol.js code in a self-contained iframe with controls.
 
-    Adds spin toggle and preset camera angle buttons below the viewer.
+    Adds spin toggle, preset camera angle buttons, and optional protein
+    style selector (Ribbon / Goodsell / Surface) below the viewer.
+
+    When *style_toggle* is True the generated JavaScript exposes a
+    ``_applyStyle_{vid}(mode)`` helper that re-styles model 0 (the
+    protein) without rebuilding the entire viewer.
     """
     sq = "'"  # single-quote for embedding in f-strings
     btn = 'style="padding:3px 10px;cursor:pointer;border:1px solid #ccc;border-radius:3px;background:#f5f5f5;"'
+
+    style_controls = ''
+    style_js = ''
+    if style_toggle:
+        style_js = (
+            f'window._applyStyle_{vid}=function(mode){{'
+            f'var v=window._v_{vid};'
+            # Remove any existing protein surface before switching
+            f'if(window._protSurf_{vid}!==undefined){{v.removeSurface(window._protSurf_{vid});window._protSurf_{vid}=undefined;}}'
+            f'if(mode==="ribbon"){{'
+            f'v.setStyle({{model:0}},{{cartoon:{{color:"spectrum",opacity:0.7}}}});'
+            f'}}else if(mode==="goodsell"){{'
+            f'v.setStyle({{model:0}},{{sphere:{{scale:0.6,colorscheme:{{prop:"elem",'
+            f'map:{{C:"#E8DAB2",N:"#6FA8DC",O:"#E06666",S:"#F6B26B",H:"#CCCCCC"}}'
+            f'}}}}}});'
+            f'}}else if(mode==="surface"){{'
+            f'v.setStyle({{model:0}},{{cartoon:{{color:"spectrum",opacity:0.3}}}});'
+            f'window._protSurf_{vid}=v.addSurface($3Dmol.SurfaceType.SAS,'
+            f'{{opacity:0.85,colorscheme:{{prop:"elem",map:{{C:"#F0F0F0",N:"#6FA8DC",O:"#E06666",S:"#F6B26B"}}}}}},{{model:0}});'
+            f'}}'
+            f'v.render();'
+            f'}};'
+            f'window._protSurf_{vid}=undefined;'
+        )
+        style_controls = (
+            f'<label style="font-size:12px;font-family:sans-serif;margin-right:2px;">Style:</label>'
+            f'<select onchange="window._applyStyle_{vid}(this.value)" '
+            f'style="padding:2px 6px;border:1px solid #ccc;border-radius:3px;font-size:12px;background:#f5f5f5;">'
+            f'<option value="ribbon">Ribbon</option>'
+            f'<option value="goodsell">Goodsell</option>'
+            f'<option value="surface">Surface</option>'
+            f'</select>'
+        )
+
     controls_html = (
-        f'<div style="display:flex;gap:6px;padding:4px 0;font-family:sans-serif;font-size:12px;">'
+        f'<div style="display:flex;gap:6px;padding:4px 0;font-family:sans-serif;font-size:12px;align-items:center;">'
+        f'{style_controls}'
         f'<button onclick="window._v_{vid}.spin(window._spin_{vid}=!window._spin_{vid})" '
         f'{btn}>Spin</button>'
         f'<button onclick="window._v_{vid}.rotate(90,{sq}y{sq});window._v_{vid}.render()" '
@@ -1942,7 +2026,7 @@ def _wrap_3dmol_iframe(vid, js_block, width, height):
         '</head><body style="margin:0;padding:4px;">'
         f'<div id="{vid}" style="width:100%;height:calc(100% - 36px);position:relative;"></div>'
         f'{controls_html}'
-        f'<script>(function(){{{js_block};window._v_{vid}=v;window._spin_{vid}=false;}})()</script>'
+        f'<script>(function(){{{js_block};window._v_{vid}=v;window._spin_{vid}=false;{style_js}}})()</script>'
         '</body></html>'
     )
     escaped = inner_html.replace('&', '&amp;').replace('"', '&quot;')
@@ -2119,7 +2203,7 @@ def make_3d_viewer_html(protein_pdb_data, ligand_data=None,
     js_lines.append('v.render();')
     js_block = '\n'.join(js_lines)
 
-    return _wrap_3dmol_iframe(vid, js_block, width, height)
+    return _wrap_3dmol_iframe(vid, js_block, width, height, style_toggle=True)
 
 
 def visualize_poses(protein_pdb_data, poses_pdbqt_data, n_poses=3,
@@ -2176,7 +2260,7 @@ def visualize_poses(protein_pdb_data, poses_pdbqt_data, n_poses=3,
     js_lines.append(f'v.zoomTo({{model:{first_pose_model}}});v.zoom(0.8);v.render();')
     js_block = '\n'.join(js_lines)
 
-    return _wrap_3dmol_iframe(vid, js_block, width, height)
+    return _wrap_3dmol_iframe(vid, js_block, width, height, style_toggle=True)
 
 
 def get_docking_engine_status():
@@ -2201,6 +2285,336 @@ def get_docking_engine_status():
     else:
         engines.append('Uni-Dock (GPU): Not installed')
     return '\n'.join(engines)
+
+
+# ---------------------------------------------------------------------------
+# PDB Export Bundle for Blender / Molecular Nodes
+# ---------------------------------------------------------------------------
+
+def export_pdb_bundle(protein_pdb, poses_pdbqt, n_poses=5, ligand_name='ligand',
+                      output_dir='/content/acudock_export'):
+    """Create a zip bundle of clean PDB files for use in Blender Molecular Nodes.
+
+    Exports the prepared receptor and each docked pose as separate PDB files,
+    plus a README with import instructions.  Molecular Nodes reads PDB files
+    directly, so no .blend conversion is needed.
+
+    Args:
+        protein_pdb: Path to prepared protein PDB file.
+        poses_pdbqt: Path to multi-model PDBQT poses file.
+        n_poses: Number of top poses to include.
+        ligand_name: Base name for ligand files.
+        output_dir: Working directory for intermediate files.
+
+    Returns:
+        Path to the generated .zip file.
+    """
+    import shutil
+    import zipfile
+
+    os.makedirs(output_dir, exist_ok=True)
+    bundle_dir = os.path.join(output_dir, 'blender_bundle')
+    if os.path.exists(bundle_dir):
+        shutil.rmtree(bundle_dir)
+    os.makedirs(bundle_dir)
+
+    # Copy receptor PDB
+    receptor_dst = os.path.join(bundle_dir, 'receptor.pdb')
+    shutil.copy2(protein_pdb, receptor_dst)
+
+    # Extract each pose as a clean PDB
+    with open(poses_pdbqt, 'r') as f:
+        poses_data = f.read()
+
+    all_models = poses_data.split('MODEL')
+    exported = 0
+    for i in range(min(n_poses, len(all_models) - 1)):
+        pose_str = 'MODEL' + all_models[i + 1].split('ENDMDL')[0] + 'ENDMDL'
+        clean_pdb = _clean_pdbqt_for_viewer(pose_str)
+        pose_path = os.path.join(bundle_dir, f'{ligand_name}_pose_{i + 1}.pdb')
+        with open(pose_path, 'w') as f:
+            f.write(clean_pdb)
+        exported += 1
+
+    # Write README
+    readme = (
+        "AcuDock — Blender / Molecular Nodes Export\n"
+        "==========================================\n\n"
+        "This bundle contains:\n"
+        f"  - receptor.pdb          : Prepared protein structure\n"
+        f"  - {ligand_name}_pose_*.pdb : Top {exported} docked ligand poses\n\n"
+        "Import Instructions (Blender + Molecular Nodes):\n"
+        "  1. Install Molecular Nodes add-on in Blender (if not already)\n"
+        "  2. Open Blender → Molecular Nodes panel\n"
+        "  3. Click 'Load Molecule' → select receptor.pdb\n"
+        "  4. Add a second 'Load Molecule' node for each ligand pose PDB\n"
+        "  5. Use Geometry Nodes to style (cartoon, surface, ball-and-stick)\n\n"
+        "Tips:\n"
+        "  - For animations: import multiple poses and use Switch or\n"
+        "    keyframed visibility to animate binding.\n"
+        "  - Molecular Nodes supports cartoon, ribbon, surface, and\n"
+        "    ball-and-stick representations natively.\n"
+        "  - Use the 'Color Attribute' node with element data for\n"
+        "    CPK coloring.\n"
+    )
+    with open(os.path.join(bundle_dir, 'README.txt'), 'w') as f:
+        f.write(readme)
+
+    # Create zip
+    zip_path = os.path.join(output_dir, 'acudock_blender_export.zip')
+    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for root, _dirs, files in os.walk(bundle_dir):
+            for fname in files:
+                fpath = os.path.join(root, fname)
+                arcname = os.path.join('acudock_blender_export',
+                                       os.path.relpath(fpath, bundle_dir))
+                zf.write(fpath, arcname)
+
+    # Clean up intermediate dir
+    shutil.rmtree(bundle_dir)
+    return zip_path
+
+
+# ---------------------------------------------------------------------------
+# 2D Ligand Interaction Diagram
+# ---------------------------------------------------------------------------
+
+def _interaction_color(itype):
+    """Return (fill_color, edge_color) for an interaction type."""
+    palette = {
+        'HBond':       ('#3498DB', '#2471A3'),
+        'HBDonor':     ('#3498DB', '#2471A3'),
+        'HBAcceptor':  ('#5DADE2', '#2E86C1'),
+        'Hydrophobic': ('#2ECC71', '#1E8449'),
+        'PiStacking':  ('#9B59B6', '#6C3483'),
+        'FaceToFace':  ('#9B59B6', '#6C3483'),
+        'EdgeToFace':  ('#AF7AC5', '#7D3C98'),
+        'PiCation':    ('#E91E63', '#AD1457'),
+        'SaltBridge':  ('#E74C3C', '#B03A2E'),
+        'Anionic':     ('#FF5722', '#D84315'),
+        'Cationic':    ('#FF9800', '#E65100'),
+        'VanDerWaals': ('#BDC3C7', '#7F8C8D'),
+    }
+    for key, colors in palette.items():
+        if key.lower() in itype.lower():
+            return colors
+    return ('#BDC3C7', '#7F8C8D')
+
+
+def _interaction_linestyle(itype):
+    """Return matplotlib linestyle for an interaction type."""
+    itype_lower = itype.lower()
+    if 'hb' in itype_lower or 'hbond' in itype_lower:
+        return '--'
+    if 'hydrophobic' in itype_lower or 'vanderwaals' in itype_lower:
+        return ':'
+    if 'pi' in itype_lower or 'face' in itype_lower:
+        return '-.'
+    return '-'
+
+
+def generate_interaction_diagram_2d(protein_pdb, poses_pdbqt, smiles,
+                                     pose_index=0, output_path=None,
+                                     figsize=(10, 10)):
+    """Generate a 2D ligand-interaction diagram.
+
+    Draws the ligand in 2D (RDKit) at the center, surrounded by
+    residue nodes colored by interaction type with connecting lines.
+    Produces the clean, professional "pharma-style" 2D diagrams
+    common in drug discovery publications.
+
+    Args:
+        protein_pdb: Path to prepared protein PDB.
+        poses_pdbqt: Path to multi-model PDBQT poses file.
+        smiles: Ligand SMILES string (for 2D depiction).
+        pose_index: Which pose to analyze.
+        output_path: Optional path to save PNG. If None, returns figure.
+        figsize: Figure size tuple.
+
+    Returns:
+        matplotlib Figure, or path to saved PNG if output_path is set.
+    """
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as mpatches
+    from matplotlib.offsetbox import OffsetImage, AnnotationBbox
+    from io import BytesIO
+    from PIL import Image
+
+    # --- 1. Generate 2D ligand image via RDKit ---
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        raise ValueError(f'Invalid SMILES: {smiles}')
+    AllChem.Compute2DCoords(mol)
+    img = Draw.MolToImage(mol, size=(400, 400), kekulize=True)
+
+    # --- 2. Detect interactions using existing contact analysis ---
+    with open(protein_pdb, 'r') as f:
+        protein_data = f.read()
+
+    pose_data = extract_pose_from_pdbqt(poses_pdbqt, pose_index)
+    lig_coords, lig_elements = _get_ligand_coords_and_elements(pose_data)
+    if not lig_coords:
+        raise ValueError('Could not extract ligand coordinates from pose.')
+
+    lig_arr = np.array(lig_coords)
+    prot_atoms = _parse_pdb_atoms(protein_data)
+    nearby = _find_nearby_residues(prot_atoms, lig_arr, cutoff=5.0)
+    hbonds = _detect_hbonds(nearby, lig_coords, lig_elements)
+    hydrophobics = _detect_hydrophobic_contacts(nearby, lig_coords, lig_elements)
+
+    # Build interaction list: {residue_label: [interaction_types]}
+    residue_interactions = {}
+    # Map all nearby residues
+    residue_key_to_label = {}
+    for (chain, rname, rnum), atoms in nearby.items():
+        label = f'{rname}{rnum}'
+        residue_key_to_label[(chain, rname, rnum)] = label
+        if label not in residue_interactions:
+            residue_interactions[label] = set()
+
+    # H-bonds — prot_label is "RES_NAMENUM.ATOM_NAME", extract residue part
+    for hb in hbonds:
+        prot_label = hb.get('prot_label', '')
+        res_label = prot_label.split('.')[0] if '.' in prot_label else prot_label
+        if res_label not in residue_interactions:
+            residue_interactions[res_label] = set()
+        residue_interactions[res_label].add('HBond')
+
+    # Hydrophobic contacts — match back to nearby residues by protein coords
+    hc_prot_coords = set()
+    for hc in hydrophobics:
+        px, py_, pz = hc['prot_xyz']
+        hc_prot_coords.add((round(px, 3), round(py_, 3), round(pz, 3)))
+    for (chain, rname, rnum), atoms in nearby.items():
+        label = f'{rname}{rnum}'
+        for atom in atoms:
+            coord = (round(atom['x'], 3), round(atom['y'], 3), round(atom['z'], 3))
+            if coord in hc_prot_coords:
+                residue_interactions.setdefault(label, set()).add('Hydrophobic')
+                break
+
+    # Also try ProLIF if available for richer interaction types
+    try:
+        summary_df, _ = compute_interaction_fingerprint(
+            protein_pdb, poses_pdbqt, pose_index=pose_index, smiles=smiles
+        )
+        if summary_df is not None and not summary_df.empty:
+            for _, row in summary_df.iterrows():
+                res = str(row['Residue'])
+                itype = str(row['Type'])
+                if res not in residue_interactions:
+                    residue_interactions[res] = set()
+                residue_interactions[res].add(itype)
+    except Exception:
+        pass  # ProLIF not available; use geometric contacts only
+
+    # Mark remaining residues without specific interactions as VanDerWaals
+    for label in residue_interactions:
+        if not residue_interactions[label]:
+            residue_interactions[label].add('VanDerWaals')
+
+    # --- 3. Layout residues in a circle around the ligand ---
+    n_res = len(residue_interactions)
+    if n_res == 0:
+        raise ValueError('No interacting residues found for this pose.')
+
+    fig, ax = plt.subplots(1, 1, figsize=figsize)
+    ax.set_xlim(-1.5, 1.5)
+    ax.set_ylim(-1.5, 1.5)
+    ax.set_aspect('equal')
+    ax.axis('off')
+    fig.patch.set_facecolor('white')
+
+    # Draw ligand image at center
+    img_arr = np.array(img)
+    imagebox = OffsetImage(img_arr, zoom=0.55)
+    ab = AnnotationBbox(imagebox, (0, 0), frameon=True,
+                        bboxprops=dict(boxstyle='round,pad=0.1',
+                                       facecolor='#FAFAFA',
+                                       edgecolor='#CCCCCC', linewidth=1.5))
+    ax.add_artist(ab)
+
+    # Place residues around the ligand
+    sorted_residues = sorted(residue_interactions.keys())
+    radius = 1.15
+    angles = np.linspace(0, 2 * np.pi, n_res, endpoint=False)
+    # Offset so first residue is at top
+    angles = angles + np.pi / 2
+
+    for i, (res_label, angle) in enumerate(zip(sorted_residues, angles)):
+        itypes = residue_interactions[res_label]
+        primary_itype = sorted(itypes)[0]  # pick one for coloring
+        fill_color, edge_color = _interaction_color(primary_itype)
+
+        rx = radius * np.cos(angle)
+        ry = radius * np.sin(angle)
+
+        # Draw rounded rectangle for residue
+        bbox = mpatches.FancyBboxPatch(
+            (rx - 0.15, ry - 0.07), 0.30, 0.14,
+            boxstyle='round,pad=0.03',
+            facecolor=fill_color, edgecolor=edge_color,
+            linewidth=1.5, alpha=0.9, zorder=3,
+        )
+        ax.add_patch(bbox)
+
+        # Residue label text
+        ax.text(rx, ry, res_label, ha='center', va='center',
+                fontsize=8, fontweight='bold', color='white', zorder=4)
+
+        # Draw line from near-center to residue
+        line_r_inner = 0.35  # stop before ligand image
+        line_r_outer = radius - 0.18  # stop before residue box
+        lx_inner = line_r_inner * np.cos(angle)
+        ly_inner = line_r_inner * np.sin(angle)
+        lx_outer = line_r_outer * np.cos(angle)
+        ly_outer = line_r_outer * np.sin(angle)
+
+        ls = _interaction_linestyle(primary_itype)
+        ax.plot([lx_inner, lx_outer], [ly_inner, ly_outer],
+                color=edge_color, linestyle=ls, linewidth=1.5,
+                alpha=0.7, zorder=1)
+
+        # Add small interaction type label along the line
+        mid_x = (lx_inner + lx_outer) / 2
+        mid_y = (ly_inner + ly_outer) / 2
+        # Show all interaction types for this residue
+        type_str = ', '.join(sorted(itypes))
+        ax.text(mid_x, mid_y, type_str, ha='center', va='center',
+                fontsize=6, color='#555555',
+                bbox=dict(boxstyle='round,pad=0.15', facecolor='white',
+                          edgecolor='none', alpha=0.85),
+                zorder=2)
+
+    # --- 4. Legend ---
+    seen_types = set()
+    for itypes in residue_interactions.values():
+        seen_types.update(itypes)
+
+    legend_handles = []
+    for itype in sorted(seen_types):
+        fill, edge = _interaction_color(itype)
+        legend_handles.append(
+            mpatches.Patch(facecolor=fill, edgecolor=edge,
+                           linewidth=1.2, label=itype)
+        )
+    if legend_handles:
+        ax.legend(handles=legend_handles, loc='lower right',
+                  fontsize=8, framealpha=0.9, edgecolor='#CCCCCC',
+                  title='Interactions', title_fontsize=9)
+
+    ax.set_title('2D Ligand Interaction Diagram', fontsize=14,
+                 fontweight='bold', pad=12)
+
+    plt.tight_layout()
+
+    if output_path:
+        fig.savefig(output_path, dpi=150, bbox_inches='tight',
+                    facecolor='white', edgecolor='none')
+        plt.close(fig)
+        return output_path
+
+    return fig
 
 
 # ---------------------------------------------------------------------------
