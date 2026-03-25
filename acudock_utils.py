@@ -608,8 +608,12 @@ def compute_interaction_fingerprint(protein_pdb, poses_pdbqt, pose_index=0,
         return None, None
 
     try:
-        # Load protein
+        from MDAnalysis.topology.guessers import guess_types
+
+        # Load protein — guess elements if missing
         prot = mda.Universe(protein_pdb)
+        if not hasattr(prot.atoms, 'elements') or len(prot.atoms.elements) == 0:
+            prot.add_TopologyAttr('elements', guess_types(prot.atoms.names))
         prot_mol = prolif.Molecule.from_mda(prot)
 
         # Extract pose and write temp PDB
@@ -620,6 +624,8 @@ def compute_interaction_fingerprint(protein_pdb, poses_pdbqt, pose_index=0,
         tmp_pdb.close()
 
         lig_u = mda.Universe(tmp_pdb.name)
+        if not hasattr(lig_u.atoms, 'elements') or len(lig_u.atoms.elements) == 0:
+            lig_u.add_TopologyAttr('elements', guess_types(lig_u.atoms.names))
         lig_mol = prolif.Molecule.from_mda(lig_u)
 
         # Compute fingerprint
@@ -1651,16 +1657,106 @@ def display_3d_viewer(view):
 
     Uses an iframe with data URI to bypass JavaScript injection issues
     that occur when py3Dmol runs inside nested Output widgets in Colab.
+
+    Injects a protein style toggle (Ribbon / Goodsell / Surface) and
+    camera control buttons into the viewer toolbar.
     """
     from IPython.display import display, HTML
 
     html_content = view._make_html()
-    b64 = base64.b64encode(html_content.encode()).decode()
     w = view.width if isinstance(view.width, (int, float)) else 1000
     h = view.height if isinstance(view.height, (int, float)) else 700
+
+    # Inject style toggle + controls into the HTML produced by py3Dmol.
+    # py3Dmol generates a self-contained HTML page; we append our toolbar
+    # just before </body>.
+    vid = 'pv_' + uuid.uuid4().hex[:8]
+    toolbar_css = (
+        'display:flex;gap:6px;padding:4px 8px;font-family:sans-serif;'
+        'font-size:12px;align-items:center;background:#fafafa;'
+        'border-top:1px solid #eee;'
+    )
+    btn_css = (
+        'padding:3px 10px;cursor:pointer;border:1px solid #ccc;'
+        'border-radius:3px;background:#f5f5f5;font-size:12px;'
+    )
+    sel_css = (
+        'padding:2px 6px;border:1px solid #ccc;border-radius:3px;'
+        'font-size:12px;background:#f5f5f5;'
+    )
+
+    toolbar_and_script = f'''
+<div id="tb_{vid}" style="{toolbar_css}">
+  <label style="font-size:12px;margin-right:2px;">Style:</label>
+  <select id="sel_{vid}" style="{sel_css}"
+    onchange="window._styleSwitch_{vid}(this.value)">
+    <option value="ribbon">Ribbon</option>
+    <option value="goodsell">Goodsell</option>
+    <option value="surface">Surface</option>
+  </select>
+  <button style="{btn_css}"
+    onclick="window._viewer_{vid}.spin(window._spinning_{vid}=!window._spinning_{vid})">Spin</button>
+  <button style="{btn_css}"
+    onclick="window._viewer_{vid}.rotate(90,'y');window._viewer_{vid}.render()">Rotate 90&deg;</button>
+  <button style="{btn_css}"
+    onclick="window._viewer_{vid}.rotate(90,'x');window._viewer_{vid}.render()">Top</button>
+  <button style="{btn_css}"
+    onclick="window._viewer_{vid}.zoomTo();window._viewer_{vid}.zoom(0.8);window._viewer_{vid}.render()">Reset</button>
+</div>
+<script>
+(function(){{
+  // Grab the first 3Dmol viewer on the page
+  var allDivs = document.querySelectorAll('[data-3dmol],.viewer_3Dmoljs');
+  var vDiv = allDivs.length ? allDivs[0] : document.querySelector('div[style*="position"]');
+  if(!vDiv) return;
+  // 3Dmol stores the viewer on the jQuery data or as ._symmetry_
+  var v = null;
+  if(typeof $ !== 'undefined' && $(vDiv).data('3Dmol.viewer'))
+    v = $(vDiv).data('3Dmol.viewer');
+  else if(vDiv.viewer) v = vDiv.viewer;
+  else {{
+    // Walk $3Dmol viewers
+    try {{ v = $3Dmol.viewers && $3Dmol.viewers[0]; }} catch(e){{}}
+  }}
+  if(!v) return;
+  window._viewer_{vid} = v;
+  window._spinning_{vid} = false;
+  window._protSurf_{vid} = null;
+
+  window._styleSwitch_{vid} = function(mode) {{
+    if(window._protSurf_{vid} !== null) {{
+      try {{ v.removeSurface(window._protSurf_{vid}); }} catch(e){{}}
+      window._protSurf_{vid} = null;
+    }}
+    if(mode === 'ribbon') {{
+      v.setStyle({{model:0}}, {{cartoon:{{color:'spectrum',opacity:0.7}}}});
+    }} else if(mode === 'goodsell') {{
+      v.setStyle({{model:0}}, {{sphere:{{scale:0.6,
+        colorscheme:{{prop:'elem',map:{{C:'#E8DAB2',N:'#6FA8DC',O:'#E06666',S:'#F6B26B',H:'#CCCCCC'}}}}}}}});
+    }} else if(mode === 'surface') {{
+      v.setStyle({{model:0}}, {{cartoon:{{color:'spectrum',opacity:0.3}}}});
+      window._protSurf_{vid} = v.addSurface($3Dmol.SurfaceType.SAS,
+        {{opacity:0.85,colorscheme:{{prop:'elem',
+          map:{{C:'#F0F0F0',N:'#6FA8DC',O:'#E06666',S:'#F6B26B'}}}}}},
+        {{model:0}});
+    }}
+    v.render();
+  }};
+}})();
+</script>
+'''
+
+    # Insert toolbar before closing </body>
+    if '</body>' in html_content:
+        html_content = html_content.replace('</body>',
+                                            toolbar_and_script + '</body>')
+    else:
+        html_content += toolbar_and_script
+
+    b64 = base64.b64encode(html_content.encode()).decode()
     display(HTML(
         f'<iframe src="data:text/html;base64,{b64}" '
-        f'width="{int(w) + 20}" height="{int(h) + 20}" '
+        f'width="{int(w) + 20}" height="{int(h) + 60}" '
         f'style="border:1px solid #ddd; border-radius:4px;"></iframe>'
     ))
 
@@ -2413,15 +2509,47 @@ def _interaction_linestyle(itype):
     return '-'
 
 
+def _match_3d_to_2d_atom(lig_xyz_3d, lig_coords_3d, mol_2d):
+    """Find the RDKit atom index whose 3D pose coordinate best matches.
+
+    Args:
+        lig_xyz_3d: (x, y, z) contact point on the ligand (from docking).
+        lig_coords_3d: List of (x, y, z) for all ligand heavy atoms in pose
+                       order (same order as _get_ligand_coords_and_elements).
+        mol_2d: RDKit Mol with 2D coordinates computed.
+
+    Returns:
+        (atom_idx, x2d, y2d) — index into mol_2d and its 2D position.
+    """
+    target = np.array(lig_xyz_3d)
+    best_idx = 0
+    best_dist = float('inf')
+    for i, c3 in enumerate(lig_coords_3d):
+        d = np.linalg.norm(target - np.array(c3))
+        if d < best_dist:
+            best_dist = d
+            best_idx = i
+
+    # Map pose-order index to RDKit atom index.
+    # The pose has one entry per heavy atom line; RDKit atoms are indexed
+    # by the molecule.  For small molecules the orders usually align, but
+    # we clamp to the valid range.
+    conf = mol_2d.GetConformer()
+    n_atoms = mol_2d.GetNumAtoms()
+    ridx = min(best_idx, n_atoms - 1)
+    pos = conf.GetAtomPosition(ridx)
+    return ridx, pos.x, pos.y
+
+
 def generate_interaction_diagram_2d(protein_pdb, poses_pdbqt, smiles,
                                      pose_index=0, output_path=None,
-                                     figsize=(10, 10)):
+                                     figsize=(12, 12)):
     """Generate a 2D ligand-interaction diagram.
 
-    Draws the ligand in 2D (RDKit) at the center, surrounded by
-    residue nodes colored by interaction type with connecting lines.
-    Produces the clean, professional "pharma-style" 2D diagrams
-    common in drug discovery publications.
+    Each interacting residue is positioned near the specific ligand atom
+    it contacts (mapped from 3D docking coordinates to RDKit 2D layout).
+    Lines connect the exact ligand atom to the residue node, color-coded
+    by interaction type.
 
     Args:
         protein_pdb: Path to prepared protein PDB.
@@ -2437,160 +2565,261 @@ def generate_interaction_diagram_2d(protein_pdb, poses_pdbqt, smiles,
     import matplotlib.pyplot as plt
     import matplotlib.patches as mpatches
     from matplotlib.offsetbox import OffsetImage, AnnotationBbox
-    from io import BytesIO
-    from PIL import Image
 
-    # --- 1. Generate 2D ligand image via RDKit ---
+    # --- 1. Generate 2D ligand with RDKit ---
     mol = Chem.MolFromSmiles(smiles)
     if mol is None:
         raise ValueError(f'Invalid SMILES: {smiles}')
+    mol = Chem.AddHs(mol)
     AllChem.Compute2DCoords(mol)
-    img = Draw.MolToImage(mol, size=(400, 400), kekulize=True)
+    mol_noH = Chem.RemoveHs(mol)
+    AllChem.Compute2DCoords(mol_noH)
 
-    # --- 2. Detect interactions using existing contact analysis ---
+    # Get 2D atom positions
+    conf = mol_noH.GetConformer()
+    atoms_2d = []
+    for i in range(mol_noH.GetNumAtoms()):
+        p = conf.GetAtomPosition(i)
+        atoms_2d.append((p.x, p.y))
+    atoms_2d = np.array(atoms_2d)
+
+    # --- 2. Detect interactions ---
     with open(protein_pdb, 'r') as f:
         protein_data = f.read()
 
     pose_data = extract_pose_from_pdbqt(poses_pdbqt, pose_index)
-    lig_coords, lig_elements = _get_ligand_coords_and_elements(pose_data)
-    if not lig_coords:
+    lig_coords_3d, lig_elements = _get_ligand_coords_and_elements(pose_data)
+    if not lig_coords_3d:
         raise ValueError('Could not extract ligand coordinates from pose.')
 
-    lig_arr = np.array(lig_coords)
+    lig_arr = np.array(lig_coords_3d)
     prot_atoms = _parse_pdb_atoms(protein_data)
     nearby = _find_nearby_residues(prot_atoms, lig_arr, cutoff=5.0)
-    hbonds = _detect_hbonds(nearby, lig_coords, lig_elements)
-    hydrophobics = _detect_hydrophobic_contacts(nearby, lig_coords, lig_elements)
+    hbonds = _detect_hbonds(nearby, lig_coords_3d, lig_elements)
+    hydrophobics = _detect_hydrophobic_contacts(nearby, lig_coords_3d, lig_elements)
 
-    # Build interaction list: {residue_label: [interaction_types]}
-    residue_interactions = {}
-    # Map all nearby residues
-    residue_key_to_label = {}
-    for (chain, rname, rnum), atoms in nearby.items():
-        label = f'{rname}{rnum}'
-        residue_key_to_label[(chain, rname, rnum)] = label
-        if label not in residue_interactions:
-            residue_interactions[label] = set()
+    # Build interaction dict: {res_label: [(itype, lig_xyz_3d), ...]}
+    residue_contacts = {}
 
-    # H-bonds — prot_label is "RES_NAMENUM.ATOM_NAME", extract residue part
+    # H-bonds: have both prot_xyz and lig_xyz
     for hb in hbonds:
         prot_label = hb.get('prot_label', '')
         res_label = prot_label.split('.')[0] if '.' in prot_label else prot_label
-        if res_label not in residue_interactions:
-            residue_interactions[res_label] = set()
-        residue_interactions[res_label].add('HBond')
+        if not res_label:
+            continue
+        residue_contacts.setdefault(res_label, []).append(
+            ('H-Bond', hb['lig_xyz'], hb.get('distance', 0)))
 
-    # Hydrophobic contacts — match back to nearby residues by protein coords
-    hc_prot_coords = set()
+    # Hydrophobic contacts: have prot_xyz and lig_xyz
+    # Map back to residue label via nearby residues dict
     for hc in hydrophobics:
         px, py_, pz = hc['prot_xyz']
-        hc_prot_coords.add((round(px, 3), round(py_, 3), round(pz, 3)))
+        # Find which residue this protein atom belongs to
+        for (chain, rname, rnum), atoms in nearby.items():
+            for atom in atoms:
+                if (abs(atom['x'] - px) < 0.01 and
+                    abs(atom['y'] - py_) < 0.01 and
+                    abs(atom['z'] - pz) < 0.01):
+                    label = f'{rname}{rnum}'
+                    residue_contacts.setdefault(label, []).append(
+                        ('Hydrophobic', hc['lig_xyz'], hc.get('distance', 0)))
+                    break
+            else:
+                continue
+            break
+
+    # Add nearby residues that have no specific contact as "Contact"
     for (chain, rname, rnum), atoms in nearby.items():
         label = f'{rname}{rnum}'
-        for atom in atoms:
-            coord = (round(atom['x'], 3), round(atom['y'], 3), round(atom['z'], 3))
-            if coord in hc_prot_coords:
-                residue_interactions.setdefault(label, set()).add('Hydrophobic')
-                break
+        if label not in residue_contacts:
+            # Find closest ligand atom to this residue's centroid
+            cx = np.mean([a['x'] for a in atoms])
+            cy = np.mean([a['y'] for a in atoms])
+            cz = np.mean([a['z'] for a in atoms])
+            dists = [np.linalg.norm(np.array(lc) - np.array([cx, cy, cz]))
+                     for lc in lig_coords_3d]
+            closest_idx = int(np.argmin(dists))
+            residue_contacts[label] = [
+                ('Contact', lig_coords_3d[closest_idx], dists[closest_idx])]
 
-    # Also try ProLIF if available for richer interaction types
-    try:
-        summary_df, _ = compute_interaction_fingerprint(
-            protein_pdb, poses_pdbqt, pose_index=pose_index, smiles=smiles
-        )
-        if summary_df is not None and not summary_df.empty:
-            for _, row in summary_df.iterrows():
-                res = str(row['Residue'])
-                itype = str(row['Type'])
-                if res not in residue_interactions:
-                    residue_interactions[res] = set()
-                residue_interactions[res].add(itype)
-    except Exception:
-        pass  # ProLIF not available; use geometric contacts only
-
-    # Mark remaining residues without specific interactions as VanDerWaals
-    for label in residue_interactions:
-        if not residue_interactions[label]:
-            residue_interactions[label].add('VanDerWaals')
-
-    # --- 3. Layout residues in a circle around the ligand ---
-    n_res = len(residue_interactions)
-    if n_res == 0:
+    if not residue_contacts:
         raise ValueError('No interacting residues found for this pose.')
 
+    # --- 3. Map contacts to 2D positions ---
+    # For each residue, find the 2D position of the ligand atom it contacts
+    # and place the residue label outside, pushed away from the ligand center.
+
+    # Normalize 2D coordinates to a reasonable plot range
+    if len(atoms_2d) > 1:
+        center_2d = atoms_2d.mean(axis=0)
+        scale = max(atoms_2d.max(axis=0) - atoms_2d.min(axis=0)) or 1.0
+    else:
+        center_2d = atoms_2d[0]
+        scale = 1.0
+
+    norm_2d = (atoms_2d - center_2d) / (scale * 0.55)  # fit in ~[-0.9, 0.9]
+
+    # For each residue, compute anchor point (ligand atom 2D) and
+    # desired label position (pushed outward)
+    residue_positions = {}  # label -> (anchor_x, anchor_y, node_x, node_y, itypes)
+    push_distance = 0.55
+
+    for res_label, contacts in residue_contacts.items():
+        # Pick the primary contact (prefer H-bond > hydrophobic > contact)
+        priority = {'H-Bond': 0, 'Hydrophobic': 1, 'Contact': 2}
+        contacts_sorted = sorted(contacts, key=lambda c: priority.get(c[0], 9))
+        primary = contacts_sorted[0]
+        itype, lig_xyz, dist = primary
+
+        # Map 3D ligand contact point to nearest 2D atom
+        _, ax2d, ay2d = _match_3d_to_2d_atom(lig_xyz, lig_coords_3d, mol_noH)
+        # Normalize this point
+        anchor = (np.array([ax2d, ay2d]) - center_2d) / (scale * 0.55)
+
+        # Direction: from ligand center outward through the anchor
+        direction = anchor - np.array([0, 0])
+        d_len = np.linalg.norm(direction)
+        if d_len < 0.01:
+            direction = np.array([1.0, 0.0])
+        else:
+            direction = direction / d_len
+
+        node_pos = anchor + direction * push_distance
+        itypes = set(c[0] for c in contacts)
+        residue_positions[res_label] = (
+            anchor[0], anchor[1], node_pos[0], node_pos[1], itypes)
+
+    # Resolve overlapping residue nodes — nudge apart
+    labels = list(residue_positions.keys())
+    positions = {k: np.array([v[2], v[3]]) for k, v in residue_positions.items()}
+
+    for _iteration in range(50):
+        moved = False
+        for i in range(len(labels)):
+            for j in range(i + 1, len(labels)):
+                li, lj = labels[i], labels[j]
+                diff = positions[li] - positions[lj]
+                d = np.linalg.norm(diff)
+                min_sep = 0.28
+                if d < min_sep:
+                    if d < 0.001:
+                        diff = np.array([0.01 * (i - j), 0.01])
+                        d = np.linalg.norm(diff)
+                    push = diff / d * (min_sep - d) * 0.5
+                    positions[li] += push
+                    positions[lj] -= push
+                    moved = True
+        if not moved:
+            break
+
+    # Update positions
+    for k in labels:
+        ax_, ay_, _, _, itypes = residue_positions[k]
+        residue_positions[k] = (ax_, ay_, positions[k][0], positions[k][1], itypes)
+
+    # --- 4. Draw the diagram ---
     fig, ax = plt.subplots(1, 1, figsize=figsize)
-    ax.set_xlim(-1.5, 1.5)
-    ax.set_ylim(-1.5, 1.5)
-    ax.set_aspect('equal')
-    ax.axis('off')
     fig.patch.set_facecolor('white')
 
-    # Draw ligand image at center
-    img_arr = np.array(img)
-    imagebox = OffsetImage(img_arr, zoom=0.55)
-    ab = AnnotationBbox(imagebox, (0, 0), frameon=True,
-                        bboxprops=dict(boxstyle='round,pad=0.1',
-                                       facecolor='#FAFAFA',
-                                       edgecolor='#CCCCCC', linewidth=1.5))
-    ax.add_artist(ab)
+    # Compute plot bounds from all positions
+    all_pts = list(norm_2d) + [np.array([v[2], v[3]]) for v in residue_positions.values()]
+    all_pts = np.array(all_pts)
+    margin = 0.6
+    xmin, xmax = all_pts[:, 0].min() - margin, all_pts[:, 0].max() + margin
+    ymin, ymax = all_pts[:, 1].min() - margin, all_pts[:, 1].max() + margin
+    # Make square
+    span = max(xmax - xmin, ymax - ymin)
+    cx_ = (xmin + xmax) / 2
+    cy_ = (ymin + ymax) / 2
+    ax.set_xlim(cx_ - span / 2, cx_ + span / 2)
+    ax.set_ylim(cy_ - span / 2, cy_ + span / 2)
+    ax.set_aspect('equal')
+    ax.axis('off')
 
-    # Place residues around the ligand
-    sorted_residues = sorted(residue_interactions.keys())
-    radius = 1.15
-    angles = np.linspace(0, 2 * np.pi, n_res, endpoint=False)
-    # Offset so first residue is at top
-    angles = angles + np.pi / 2
+    # Draw ligand bonds
+    for bond in mol_noH.GetBonds():
+        i1, i2 = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()
+        x1, y1 = norm_2d[i1]
+        x2, y2 = norm_2d[i2]
+        bt = bond.GetBondTypeAsDouble()
+        if bt >= 2:
+            # Double bond: two parallel lines
+            dx, dy = x2 - x1, y2 - y1
+            length = math.sqrt(dx * dx + dy * dy) or 1.0
+            nx, ny = -dy / length * 0.03, dx / length * 0.03
+            ax.plot([x1 + nx, x2 + nx], [y1 + ny, y2 + ny],
+                    color='#333333', linewidth=1.5, zorder=2)
+            ax.plot([x1 - nx, x2 - nx], [y1 - ny, y2 - ny],
+                    color='#333333', linewidth=1.5, zorder=2)
+        else:
+            ax.plot([x1, x2], [y1, y2], color='#333333', linewidth=1.5, zorder=2)
 
-    for i, (res_label, angle) in enumerate(zip(sorted_residues, angles)):
-        itypes = residue_interactions[res_label]
-        primary_itype = sorted(itypes)[0]  # pick one for coloring
+    # Draw ligand atoms
+    elem_colors = {
+        'C': '#333333', 'N': '#3465A4', 'O': '#CC0000',
+        'S': '#C4A000', 'F': '#4E9A06', 'Cl': '#4E9A06',
+        'Br': '#8F5902', 'P': '#CE5C00', 'I': '#5C3566',
+    }
+    for i in range(mol_noH.GetNumAtoms()):
+        atom = mol_noH.GetAtomWithIdx(i)
+        sym = atom.GetSymbol()
+        x, y = norm_2d[i]
+        color = elem_colors.get(sym, '#333333')
+        if sym != 'C':
+            # Draw heteroatom label
+            ax.plot(x, y, 'o', color='white', markersize=12, zorder=3)
+            ax.text(x, y, sym, ha='center', va='center',
+                    fontsize=8, fontweight='bold', color=color, zorder=4)
+        else:
+            ax.plot(x, y, 'o', color='#333333', markersize=3, zorder=3)
+
+    # Draw interaction lines and residue nodes
+    seen_types = set()
+    for res_label, (ax_, ay_, nx_, ny_, itypes) in residue_positions.items():
+        primary_itype = sorted(itypes, key=lambda t: {
+            'H-Bond': 0, 'Hydrophobic': 1, 'Contact': 2}.get(t, 9))[0]
         fill_color, edge_color = _interaction_color(primary_itype)
+        seen_types.update(itypes)
 
-        rx = radius * np.cos(angle)
-        ry = radius * np.sin(angle)
+        # Line from ligand atom to residue node
+        ls = _interaction_linestyle(primary_itype)
+        lw = 2.0 if primary_itype == 'H-Bond' else 1.5
+        ax.plot([ax_, nx_], [ay_, ny_],
+                color=edge_color, linestyle=ls, linewidth=lw,
+                alpha=0.8, zorder=1)
 
-        # Draw rounded rectangle for residue
+        # Distance label on the line
+        for contact in sorted(residue_contacts[res_label],
+                               key=lambda c: {'H-Bond': 0, 'Hydrophobic': 1}.get(c[0], 9)):
+            if contact[2] > 0:
+                mx = (ax_ + nx_) / 2
+                my = (ay_ + ny_) / 2
+                ax.text(mx, my, f'{contact[2]:.1f}\u00c5',
+                        ha='center', va='center', fontsize=6,
+                        color='#666666', zorder=5,
+                        bbox=dict(boxstyle='round,pad=0.1',
+                                  facecolor='white', edgecolor='none',
+                                  alpha=0.8))
+                break
+
+        # Residue node
         bbox = mpatches.FancyBboxPatch(
-            (rx - 0.15, ry - 0.07), 0.30, 0.14,
-            boxstyle='round,pad=0.03',
+            (nx_ - 0.18, ny_ - 0.09), 0.36, 0.18,
+            boxstyle='round,pad=0.04',
             facecolor=fill_color, edgecolor=edge_color,
-            linewidth=1.5, alpha=0.9, zorder=3,
+            linewidth=1.8, alpha=0.92, zorder=6,
         )
         ax.add_patch(bbox)
 
-        # Residue label text
-        ax.text(rx, ry, res_label, ha='center', va='center',
-                fontsize=8, fontweight='bold', color='white', zorder=4)
+        ax.text(nx_, ny_, res_label, ha='center', va='center',
+                fontsize=7.5, fontweight='bold', color='white', zorder=7)
 
-        # Draw line from near-center to residue
-        line_r_inner = 0.35  # stop before ligand image
-        line_r_outer = radius - 0.18  # stop before residue box
-        lx_inner = line_r_inner * np.cos(angle)
-        ly_inner = line_r_inner * np.sin(angle)
-        lx_outer = line_r_outer * np.cos(angle)
-        ly_outer = line_r_outer * np.sin(angle)
-
-        ls = _interaction_linestyle(primary_itype)
-        ax.plot([lx_inner, lx_outer], [ly_inner, ly_outer],
-                color=edge_color, linestyle=ls, linewidth=1.5,
-                alpha=0.7, zorder=1)
-
-        # Add small interaction type label along the line
-        mid_x = (lx_inner + lx_outer) / 2
-        mid_y = (ly_inner + ly_outer) / 2
-        # Show all interaction types for this residue
+        # Small interaction type label below the node
         type_str = ', '.join(sorted(itypes))
-        ax.text(mid_x, mid_y, type_str, ha='center', va='center',
-                fontsize=6, color='#555555',
-                bbox=dict(boxstyle='round,pad=0.15', facecolor='white',
-                          edgecolor='none', alpha=0.85),
-                zorder=2)
+        ax.text(nx_, ny_ - 0.14, type_str, ha='center', va='top',
+                fontsize=5.5, color='#555555', style='italic', zorder=7)
 
-    # --- 4. Legend ---
-    seen_types = set()
-    for itypes in residue_interactions.values():
-        seen_types.update(itypes)
-
+    # --- 5. Legend ---
     legend_handles = []
     for itype in sorted(seen_types):
         fill, edge = _interaction_color(itype)
@@ -2603,7 +2832,7 @@ def generate_interaction_diagram_2d(protein_pdb, poses_pdbqt, smiles,
                   fontsize=8, framealpha=0.9, edgecolor='#CCCCCC',
                   title='Interactions', title_fontsize=9)
 
-    ax.set_title('2D Ligand Interaction Diagram', fontsize=14,
+    ax.set_title('Protein-Ligand Interaction Map', fontsize=14,
                  fontweight='bold', pad=12)
 
     plt.tight_layout()
