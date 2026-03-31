@@ -2659,10 +2659,14 @@ def generate_interaction_diagram_2d(protein_pdb, poses_pdbqt, smiles,
 
     norm_2d = (atoms_2d - center_2d) / (scale * 0.55)  # fit in ~[-0.9, 0.9]
 
+    # Compute the outer boundary of the ligand so residue nodes stay clear
+    lig_max_r = float(np.max(np.linalg.norm(norm_2d, axis=1))) if len(norm_2d) > 0 else 0.5
+    min_node_radius = lig_max_r + 0.55  # guaranteed clearance outside ligand
+
     # For each residue, compute anchor point (ligand atom 2D) and
-    # desired label position (pushed outward)
+    # desired label position (pushed outward, always outside the ligand)
     residue_positions = {}  # label -> (anchor_x, anchor_y, node_x, node_y, itypes)
-    push_distance = 0.55
+    push_distance = 0.7
 
     for res_label, contacts in residue_contacts.items():
         # Pick the primary contact (prefer H-bond > hydrophobic > contact)
@@ -2684,7 +2688,12 @@ def generate_interaction_diagram_2d(protein_pdb, poses_pdbqt, smiles,
         else:
             direction = direction / d_len
 
+        # Place node at anchor + push, but enforce minimum radius from center
         node_pos = anchor + direction * push_distance
+        node_r = np.linalg.norm(node_pos)
+        if node_r < min_node_radius:
+            node_pos = direction * min_node_radius
+
         itypes = set(c[0] for c in contacts)
         residue_positions[res_label] = (
             anchor[0], anchor[1], node_pos[0], node_pos[1], itypes)
@@ -2693,24 +2702,33 @@ def generate_interaction_diagram_2d(protein_pdb, poses_pdbqt, smiles,
     labels = list(residue_positions.keys())
     positions = {k: np.array([v[2], v[3]]) for k, v in residue_positions.items()}
 
-    for _iteration in range(50):
+    for _iteration in range(80):
         moved = False
         for i in range(len(labels)):
             for j in range(i + 1, len(labels)):
                 li, lj = labels[i], labels[j]
                 diff = positions[li] - positions[lj]
                 d = np.linalg.norm(diff)
-                min_sep = 0.28
+                min_sep = 0.42
                 if d < min_sep:
                     if d < 0.001:
                         diff = np.array([0.01 * (i - j), 0.01])
                         d = np.linalg.norm(diff)
-                    push = diff / d * (min_sep - d) * 0.5
+                    push = diff / d * (min_sep - d) * 0.55
                     positions[li] += push
                     positions[lj] -= push
                     moved = True
         if not moved:
             break
+
+    # After nudging, re-enforce minimum radius so no node drifts onto ligand
+    for k in labels:
+        r = np.linalg.norm(positions[k])
+        if r < min_node_radius:
+            if r < 0.001:
+                positions[k] = np.array([min_node_radius, 0.0])
+            else:
+                positions[k] = positions[k] / r * min_node_radius
 
     # Update positions
     for k in labels:
