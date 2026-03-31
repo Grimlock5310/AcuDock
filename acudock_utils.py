@@ -1671,55 +1671,316 @@ def display_3d_viewer(view):
     ))
 
 
+def _toolbar_js(viewer_var):
+    """Return (toolbar_html, toolbar_script) for the style toggle + controls.
+
+    *viewer_var* is the JavaScript variable name of the 3Dmol viewer
+    (e.g. ``viewer_12345``).
+    """
+    vid = viewer_var  # short alias
+    btn = (
+        'padding:3px 10px;cursor:pointer;border:1px solid #ccc;'
+        'border-radius:3px;background:#f5f5f5;font-size:12px;'
+    )
+    sel = (
+        'padding:2px 6px;border:1px solid #ccc;border-radius:3px;'
+        'font-size:12px;background:#f5f5f5;'
+    )
+    toolbar_html = (
+        f'<div style="display:flex;gap:6px;padding:6px 0;font-family:sans-serif;'
+        f'font-size:12px;align-items:center;">'
+        f'<label style="font-size:12px;margin-right:2px;">Style:</label>'
+        f'<select id="sel_{vid}" style="{sel}" '
+        f'onchange="window._styleSwitch_{vid}(this.value)">'
+        f'<option value="ribbon">Ribbon</option>'
+        f'<option value="goodsell">Goodsell</option>'
+        f'<option value="surface">Surface</option>'
+        f'</select>'
+        f'<button style="{btn}" '
+        f'onclick="{vid}.spin(window._spin_{vid}=!window._spin_{vid})">Spin</button>'
+        f'<button style="{btn}" '
+        f"""onclick="{vid}.rotate(90,'y');{vid}.render()">Rotate 90\u00b0</button>"""
+        f'<button style="{btn}" '
+        f"""onclick="{vid}.rotate(90,'x');{vid}.render()">Top</button>"""
+        f'<button style="{btn}" '
+        f'onclick="{vid}.zoomTo();{vid}.zoom(0.8);{vid}.render()">Reset</button>'
+        f'</div>'
+    )
+
+    toolbar_script = f'''
+<script>
+window._spin_{vid} = false;
+window._protSurf_{vid} = null;
+window._styleSwitch_{vid} = function(mode) {{
+  var v = {vid};
+  if(window._protSurf_{vid} !== null) {{
+    try {{ v.removeSurface(window._protSurf_{vid}); }} catch(e){{}}
+    window._protSurf_{vid} = null;
+  }}
+  if(mode === 'ribbon') {{
+    v.setStyle({{model:0}}, {{cartoon:{{color:'spectrum',opacity:0.7}}}});
+  }} else if(mode === 'goodsell') {{
+    v.setStyle({{model:0}}, {{sphere:{{scale:0.6,
+      colorscheme:{{prop:'elem',map:{{C:'#E8DAB2',N:'#6FA8DC',
+        O:'#E06666',S:'#F6B26B',H:'#CCCCCC'}}}}}}}});
+  }} else if(mode === 'surface') {{
+    v.setStyle({{model:0}}, {{cartoon:{{color:'spectrum',opacity:0.3}}}});
+    window._protSurf_{vid} = v.addSurface($3Dmol.SurfaceType.SAS,
+      {{opacity:0.85,colorscheme:{{prop:'elem',
+        map:{{C:'#F0F0F0',N:'#6FA8DC',O:'#E06666',S:'#F6B26B'}}}}}},
+      {{model:0}});
+  }}
+  v.render();
+}};
+</script>'''
+    return toolbar_html, toolbar_script
+
+
+def _py3dmol_with_toolbar(view):
+    """Render a py3Dmol view as an iframe with style toggle + camera controls.
+
+    Uses py3Dmol's own HTML (which includes the async 3Dmol.js loader),
+    then appends a toolbar that hooks into py3Dmol's viewer variable.
+    """
+    import re
+
+    html = view._make_html()
+
+    # Extract the viewer variable name (e.g. "viewer_17749858326704526")
+    m = re.search(r'(viewer_\d+)\s*=\s*\$3Dmol\.createViewer', html)
+    if not m:
+        # Fallback — no toolbar, just show the viewer
+        return html
+
+    viewer_var = m.group(1)
+    toolbar_html, toolbar_script = _toolbar_js(viewer_var)
+
+    # Wrap in a full HTML document so the toolbar appears below the viewer
+    w = view.width if isinstance(view.width, (int, float)) else 1000
+    h = view.height if isinstance(view.height, (int, float)) else 700
+
+    full_html = (
+        f'<!DOCTYPE html><html><head><style>'
+        f'body{{margin:0;padding:4px;font-family:sans-serif;}}'
+        f'</style></head><body>'
+        f'<div style="width:{w}px;height:{h}px;">{html}</div>'
+        f'{toolbar_html}'
+        f'{toolbar_script}'
+        f'</body></html>'
+    )
+    return full_html
+
+
 def display_pose_viewer(protein_pdb, poses_pdbqt, pose_index=0,
-                        width='100%', height='700px'):
+                        width=1000, height=700):
     """Display a single-pose 3D viewer with style toggle and controls.
 
-    Builds the viewer entirely via 3Dmol.js (not py3Dmol Python) so that
-    the style dropdown (Ribbon/Goodsell/Surface) and camera buttons work
-    reliably inside Colab ipywidgets Output contexts.
+    Uses py3Dmol to build the viewer (which loads 3Dmol.js via its own
+    async CDN loader), then appends a toolbar with style dropdown
+    (Ribbon/Goodsell/Surface) and camera buttons.
 
     Args:
         protein_pdb: Path to prepared protein PDB file.
         poses_pdbqt: Path to multi-model PDBQT poses file.
         pose_index: Which pose to display (0 = best).
-        width: CSS width for the viewer.
-        height: CSS height for the viewer.
+        width: Viewer width in pixels.
+        height: Viewer height in pixels.
     """
     from IPython.display import display, HTML
-
-    with open(protein_pdb, 'r') as f:
-        protein_data = f.read()
-
-    pose_data = extract_pose_from_pdbqt(poses_pdbqt, pose_index)
-    ligand_data = _clean_pdbqt_for_viewer(pose_data)
-
-    html = make_3d_viewer_html(protein_data, ligand_data=ligand_data,
-                               width=width, height=height)
-    display(HTML(html))
-
-
-def display_multi_pose_viewer(protein_pdb, poses_pdbqt, n_poses=3,
-                              width='100%', height='700px'):
-    """Display a multi-pose overlay 3D viewer with style toggle and controls.
-
-    Args:
-        protein_pdb: Path to prepared protein PDB file.
-        poses_pdbqt: Path to multi-model PDBQT poses file.
-        n_poses: Number of top poses to overlay.
-        width: CSS width for the viewer.
-        height: CSS height for the viewer.
-    """
-    from IPython.display import display, HTML
+    import py3Dmol
 
     with open(protein_pdb, 'r') as f:
         protein_data = f.read()
     with open(poses_pdbqt, 'r') as f:
         poses_data = f.read()
 
-    html = visualize_poses(protein_data, poses_data, n_poses=n_poses,
-                           width=width, height=height)
-    display(HTML(html))
+    # Extract specific pose
+    models = poses_data.split('MODEL')
+    if len(models) > 1:
+        pose_data = 'MODEL' + models[pose_index + 1].split('ENDMDL')[0] + 'ENDMDL'
+    else:
+        pose_data = poses_data
+
+    lig_coords, lig_elements = _get_ligand_coords_and_elements(pose_data)
+    lig_arr = np.array(lig_coords) if lig_coords else np.zeros((1, 3))
+
+    # Contact analysis
+    prot_atoms = _parse_pdb_atoms(protein_data)
+    nearby = _find_nearby_residues(prot_atoms, lig_arr, cutoff=5.0)
+    hbonds = _detect_hbonds(nearby, lig_coords, lig_elements)
+    hydrophobics = _detect_hydrophobic_contacts(nearby, lig_coords, lig_elements)
+    pocket_pdb = _get_residue_pdb_block(nearby)
+
+    view = py3Dmol.view(width=width, height=height)
+
+    # Model 0 — protein (ribbon)
+    view.addModel(protein_data, 'pdb')
+    view.setStyle({'model': 0}, {'cartoon': {'color': 'spectrum', 'opacity': 0.7}})
+
+    # Model 1 — ligand
+    view.addModel(_clean_pdbqt_for_viewer(pose_data), 'pdb')
+    view.setStyle({'model': 1}, {'stick': {'colorscheme': 'greenCarbon', 'radius': 0.2}})
+    view.addSurface(py3Dmol.VDW, {'opacity': 0.20, 'color': 'green'}, {'model': 1})
+
+    # Model 2 — pocket residues
+    view.addModel(pocket_pdb, 'pdb')
+    view.setStyle({'model': 2}, {'stick': {'colorscheme': 'whiteCarbon', 'radius': 0.15}})
+    view.addSurface(py3Dmol.VDW, {'opacity': 0.10, 'color': 'lightblue'}, {'model': 2})
+
+    # Residue labels
+    labeled = set()
+    for (chain, rname, rnum), atoms in nearby.items():
+        label_key = f"{rname}{rnum}"
+        if label_key in labeled:
+            continue
+        labeled.add(label_key)
+        ca = next((a for a in atoms if a['atom_name'] == 'CA'), None)
+        if ca:
+            lx, ly, lz = ca['x'], ca['y'], ca['z']
+        else:
+            lx = np.mean([a['x'] for a in atoms])
+            ly = np.mean([a['y'] for a in atoms])
+            lz = np.mean([a['z'] for a in atoms])
+        view.addLabel(label_key, {
+            'position': {'x': lx, 'y': ly, 'z': lz},
+            'fontSize': 11, 'fontColor': 'black',
+            'backgroundColor': 'white', 'backgroundOpacity': 0.7,
+            'borderColor': 'gray', 'borderThickness': 1,
+        })
+
+    # H-bond lines
+    for hb in hbonds:
+        px, py_, pz = hb['prot_xyz']
+        lx, ly, lz = hb['lig_xyz']
+        view.addLine({
+            'start': {'x': px, 'y': py_, 'z': pz},
+            'end': {'x': lx, 'y': ly, 'z': lz},
+            'color': '#F5B041', 'dashed': True,
+            'dashLength': 0.2, 'gapLength': 0.1, 'linewidth': 3,
+        })
+
+    # Hydrophobic contacts
+    for hc in hydrophobics:
+        px, py_, pz = hc['prot_xyz']
+        lx, ly, lz = hc['lig_xyz']
+        view.addLine({
+            'start': {'x': px, 'y': py_, 'z': pz},
+            'end': {'x': lx, 'y': ly, 'z': lz},
+            'color': '#AAAAAA', 'dashed': True,
+            'dashLength': 0.15, 'gapLength': 0.15, 'linewidth': 1,
+        })
+
+    view.zoomTo({'model': 1})
+    view.zoom(0.8)
+
+    full_html = _py3dmol_with_toolbar(view)
+    b64 = base64.b64encode(full_html.encode()).decode()
+    display(HTML(
+        f'<iframe src="data:text/html;base64,{b64}" '
+        f'width="{width + 20}" height="{height + 60}" '
+        f'style="border:1px solid #ddd; border-radius:4px;"></iframe>'
+    ))
+
+
+def display_multi_pose_viewer(protein_pdb, poses_pdbqt, n_poses=3,
+                              width=1000, height=700):
+    """Display a multi-pose overlay 3D viewer with style toggle and controls.
+
+    Args:
+        protein_pdb: Path to prepared protein PDB file.
+        poses_pdbqt: Path to multi-model PDBQT poses file.
+        n_poses: Number of top poses to overlay.
+        width: Viewer width in pixels.
+        height: Viewer height in pixels.
+    """
+    from IPython.display import display, HTML
+    import py3Dmol
+
+    with open(protein_pdb, 'r') as f:
+        protein_data = f.read()
+    with open(poses_pdbqt, 'r') as f:
+        poses_data = f.read()
+
+    all_models = poses_data.split('MODEL')
+    pose_strs = []
+    for i in range(min(n_poses, len(all_models) - 1)):
+        pose_strs.append('MODEL' + all_models[i + 1].split('ENDMDL')[0] + 'ENDMDL')
+
+    # Contact analysis on top pose
+    if pose_strs:
+        lig_coords, lig_elements = _get_ligand_coords_and_elements(pose_strs[0])
+        lig_arr = np.array(lig_coords) if lig_coords else np.zeros((1, 3))
+        prot_atoms = _parse_pdb_atoms(protein_data)
+        nearby = _find_nearby_residues(prot_atoms, lig_arr, cutoff=5.0)
+        hbonds = _detect_hbonds(nearby, lig_coords, lig_elements)
+        pocket_pdb = _get_residue_pdb_block(nearby)
+    else:
+        nearby, hbonds, pocket_pdb = {}, [], ''
+
+    view = py3Dmol.view(width=width, height=height)
+
+    # Model 0 — protein (faded)
+    view.addModel(protein_data, 'pdb')
+    view.setStyle({'model': 0}, {'cartoon': {'color': 'white', 'opacity': 0.4}})
+
+    # Pocket residues
+    model_idx = 1
+    if pocket_pdb:
+        view.addModel(pocket_pdb, 'pdb')
+        view.setStyle({'model': model_idx},
+                      {'stick': {'colorscheme': 'whiteCarbon', 'radius': 0.12}})
+        model_idx += 1
+
+    # Pose models
+    colors = ['#2ECC71', '#00BCD4', '#E91E63', '#FF9800', '#FFEB3B']
+    first_pose_model = model_idx
+    for i, pose in enumerate(pose_strs):
+        view.addModel(_clean_pdbqt_for_viewer(pose), 'pdb')
+        view.setStyle({'model': model_idx},
+                      {'stick': {'color': colors[i % len(colors)], 'radius': 0.18}})
+        model_idx += 1
+
+    # Residue labels
+    labeled = set()
+    for (chain, rname, rnum), atoms in nearby.items():
+        label_key = f"{rname}{rnum}"
+        if label_key in labeled:
+            continue
+        labeled.add(label_key)
+        ca = next((a for a in atoms if a['atom_name'] == 'CA'), None)
+        if ca:
+            lx, ly, lz = ca['x'], ca['y'], ca['z']
+        else:
+            lx = np.mean([a['x'] for a in atoms])
+            ly = np.mean([a['y'] for a in atoms])
+            lz = np.mean([a['z'] for a in atoms])
+        view.addLabel(label_key, {
+            'position': {'x': lx, 'y': ly, 'z': lz},
+            'fontSize': 10, 'fontColor': 'black',
+            'backgroundColor': 'white', 'backgroundOpacity': 0.6,
+        })
+
+    # H-bond lines for top pose
+    for hb in hbonds:
+        px, py_, pz = hb['prot_xyz']
+        lx, ly, lz = hb['lig_xyz']
+        view.addLine({
+            'start': {'x': px, 'y': py_, 'z': pz},
+            'end': {'x': lx, 'y': ly, 'z': lz},
+            'color': '#F5B041', 'dashed': True,
+            'dashLength': 0.2, 'gapLength': 0.1, 'linewidth': 2,
+        })
+
+    view.zoomTo({'model': first_pose_model})
+    view.zoom(0.8)
+
+    full_html = _py3dmol_with_toolbar(view)
+    b64 = base64.b64encode(full_html.encode()).decode()
+    display(HTML(
+        f'<iframe src="data:text/html;base64,{b64}" '
+        f'width="{width + 20}" height="{height + 60}" '
+        f'style="border:1px solid #ddd; border-radius:4px;"></iframe>'
+    ))
 
 
 def create_download_link(file_path, description=None):
