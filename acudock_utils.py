@@ -1657,108 +1657,69 @@ def display_3d_viewer(view):
 
     Uses an iframe with data URI to bypass JavaScript injection issues
     that occur when py3Dmol runs inside nested Output widgets in Colab.
-
-    Injects a protein style toggle (Ribbon / Goodsell / Surface) and
-    camera control buttons into the viewer toolbar.
     """
     from IPython.display import display, HTML
 
     html_content = view._make_html()
+    b64 = base64.b64encode(html_content.encode()).decode()
     w = view.width if isinstance(view.width, (int, float)) else 1000
     h = view.height if isinstance(view.height, (int, float)) else 700
-
-    # Inject style toggle + controls into the HTML produced by py3Dmol.
-    # py3Dmol generates a self-contained HTML page; we append our toolbar
-    # just before </body>.
-    vid = 'pv_' + uuid.uuid4().hex[:8]
-    toolbar_css = (
-        'display:flex;gap:6px;padding:4px 8px;font-family:sans-serif;'
-        'font-size:12px;align-items:center;background:#fafafa;'
-        'border-top:1px solid #eee;'
-    )
-    btn_css = (
-        'padding:3px 10px;cursor:pointer;border:1px solid #ccc;'
-        'border-radius:3px;background:#f5f5f5;font-size:12px;'
-    )
-    sel_css = (
-        'padding:2px 6px;border:1px solid #ccc;border-radius:3px;'
-        'font-size:12px;background:#f5f5f5;'
-    )
-
-    toolbar_and_script = f'''
-<div id="tb_{vid}" style="{toolbar_css}">
-  <label style="font-size:12px;margin-right:2px;">Style:</label>
-  <select id="sel_{vid}" style="{sel_css}"
-    onchange="window._styleSwitch_{vid}(this.value)">
-    <option value="ribbon">Ribbon</option>
-    <option value="goodsell">Goodsell</option>
-    <option value="surface">Surface</option>
-  </select>
-  <button style="{btn_css}"
-    onclick="window._viewer_{vid}.spin(window._spinning_{vid}=!window._spinning_{vid})">Spin</button>
-  <button style="{btn_css}"
-    onclick="window._viewer_{vid}.rotate(90,'y');window._viewer_{vid}.render()">Rotate 90&deg;</button>
-  <button style="{btn_css}"
-    onclick="window._viewer_{vid}.rotate(90,'x');window._viewer_{vid}.render()">Top</button>
-  <button style="{btn_css}"
-    onclick="window._viewer_{vid}.zoomTo();window._viewer_{vid}.zoom(0.8);window._viewer_{vid}.render()">Reset</button>
-</div>
-<script>
-(function(){{
-  // Grab the first 3Dmol viewer on the page
-  var allDivs = document.querySelectorAll('[data-3dmol],.viewer_3Dmoljs');
-  var vDiv = allDivs.length ? allDivs[0] : document.querySelector('div[style*="position"]');
-  if(!vDiv) return;
-  // 3Dmol stores the viewer on the jQuery data or as ._symmetry_
-  var v = null;
-  if(typeof $ !== 'undefined' && $(vDiv).data('3Dmol.viewer'))
-    v = $(vDiv).data('3Dmol.viewer');
-  else if(vDiv.viewer) v = vDiv.viewer;
-  else {{
-    // Walk $3Dmol viewers
-    try {{ v = $3Dmol.viewers && $3Dmol.viewers[0]; }} catch(e){{}}
-  }}
-  if(!v) return;
-  window._viewer_{vid} = v;
-  window._spinning_{vid} = false;
-  window._protSurf_{vid} = null;
-
-  window._styleSwitch_{vid} = function(mode) {{
-    if(window._protSurf_{vid} !== null) {{
-      try {{ v.removeSurface(window._protSurf_{vid}); }} catch(e){{}}
-      window._protSurf_{vid} = null;
-    }}
-    if(mode === 'ribbon') {{
-      v.setStyle({{model:0}}, {{cartoon:{{color:'spectrum',opacity:0.7}}}});
-    }} else if(mode === 'goodsell') {{
-      v.setStyle({{model:0}}, {{sphere:{{scale:0.6,
-        colorscheme:{{prop:'elem',map:{{C:'#E8DAB2',N:'#6FA8DC',O:'#E06666',S:'#F6B26B',H:'#CCCCCC'}}}}}}}});
-    }} else if(mode === 'surface') {{
-      v.setStyle({{model:0}}, {{cartoon:{{color:'spectrum',opacity:0.3}}}});
-      window._protSurf_{vid} = v.addSurface($3Dmol.SurfaceType.SAS,
-        {{opacity:0.85,colorscheme:{{prop:'elem',
-          map:{{C:'#F0F0F0',N:'#6FA8DC',O:'#E06666',S:'#F6B26B'}}}}}},
-        {{model:0}});
-    }}
-    v.render();
-  }};
-}})();
-</script>
-'''
-
-    # Insert toolbar before closing </body>
-    if '</body>' in html_content:
-        html_content = html_content.replace('</body>',
-                                            toolbar_and_script + '</body>')
-    else:
-        html_content += toolbar_and_script
-
-    b64 = base64.b64encode(html_content.encode()).decode()
     display(HTML(
         f'<iframe src="data:text/html;base64,{b64}" '
-        f'width="{int(w) + 20}" height="{int(h) + 60}" '
+        f'width="{int(w) + 20}" height="{int(h) + 20}" '
         f'style="border:1px solid #ddd; border-radius:4px;"></iframe>'
     ))
+
+
+def display_pose_viewer(protein_pdb, poses_pdbqt, pose_index=0,
+                        width='100%', height='700px'):
+    """Display a single-pose 3D viewer with style toggle and controls.
+
+    Builds the viewer entirely via 3Dmol.js (not py3Dmol Python) so that
+    the style dropdown (Ribbon/Goodsell/Surface) and camera buttons work
+    reliably inside Colab ipywidgets Output contexts.
+
+    Args:
+        protein_pdb: Path to prepared protein PDB file.
+        poses_pdbqt: Path to multi-model PDBQT poses file.
+        pose_index: Which pose to display (0 = best).
+        width: CSS width for the viewer.
+        height: CSS height for the viewer.
+    """
+    from IPython.display import display, HTML
+
+    with open(protein_pdb, 'r') as f:
+        protein_data = f.read()
+
+    pose_data = extract_pose_from_pdbqt(poses_pdbqt, pose_index)
+    ligand_data = _clean_pdbqt_for_viewer(pose_data)
+
+    html = make_3d_viewer_html(protein_data, ligand_data=ligand_data,
+                               width=width, height=height)
+    display(HTML(html))
+
+
+def display_multi_pose_viewer(protein_pdb, poses_pdbqt, n_poses=3,
+                              width='100%', height='700px'):
+    """Display a multi-pose overlay 3D viewer with style toggle and controls.
+
+    Args:
+        protein_pdb: Path to prepared protein PDB file.
+        poses_pdbqt: Path to multi-model PDBQT poses file.
+        n_poses: Number of top poses to overlay.
+        width: CSS width for the viewer.
+        height: CSS height for the viewer.
+    """
+    from IPython.display import display, HTML
+
+    with open(protein_pdb, 'r') as f:
+        protein_data = f.read()
+    with open(poses_pdbqt, 'r') as f:
+        poses_data = f.read()
+
+    html = visualize_poses(protein_data, poses_data, n_poses=n_poses,
+                           width=width, height=height)
+    display(HTML(html))
 
 
 def create_download_link(file_path, description=None):
