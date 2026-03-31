@@ -2086,10 +2086,10 @@ def _wrap_3dmol_iframe(vid, js_block, width, height, style_toggle=False):
         f'<script>(function(){{{js_block};window._v_{vid}=v;window._spin_{vid}=false;{style_js}}})()</script>'
         '</body></html>'
     )
-    escaped = inner_html.replace('&', '&amp;').replace('"', '&quot;')
+    b64_html = base64.b64encode(inner_html.encode()).decode()
     return (
-        f'<iframe srcdoc="{escaped}" '
-        f'style="width:{width};height:{height};border:none;" '
+        f'<iframe src="data:text/html;base64,{b64_html}" '
+        f'style="width:{width};height:{height};border:1px solid #ddd;border-radius:4px;" '
         f'sandbox="allow-scripts allow-same-origin"></iframe>'
     )
 
