@@ -76,10 +76,45 @@ def prepare_protein(pdb_id, output_dir='/content/acudock_pro'):
     """
     from pdbfixer import PDBFixer
     from openmm.app import PDBFile
+    import urllib.request
+    import urllib.error
 
     os.makedirs(output_dir, exist_ok=True)
 
-    fixer = PDBFixer(pdbid=pdb_id)
+    pdb_id = pdb_id.strip().lower()
+    raw_path = os.path.join(output_dir, f'{pdb_id}_raw.pdb')
+
+    # PDBFixer's built-in pdbid fetcher uses an outdated RCSB URL that
+    # frequently returns 404. Download the structure ourselves from the
+    # current RCSB endpoint and hand the local file to PDBFixer.
+    pdb_url = f'https://files.rcsb.org/download/{pdb_id}.pdb'
+    cif_url = f'https://files.rcsb.org/download/{pdb_id}.cif'
+
+    fetched_path = None
+    last_error = None
+    for url, local_path in [(pdb_url, raw_path),
+                            (cif_url, os.path.join(output_dir, f'{pdb_id}_raw.cif'))]:
+        try:
+            urllib.request.urlretrieve(url, local_path)
+            fetched_path = local_path
+            break
+        except urllib.error.HTTPError as e:
+            last_error = e
+            continue
+        except Exception as e:
+            last_error = e
+            continue
+
+    if fetched_path is None:
+        raise RuntimeError(
+            f"Could not download PDB entry '{pdb_id}' from RCSB "
+            f"(tried {pdb_url} and {cif_url}). Last error: {last_error}"
+        )
+
+    if fetched_path.endswith('.cif'):
+        fixer = PDBFixer(pdbxfile=open(fetched_path))
+    else:
+        fixer = PDBFixer(filename=fetched_path)
     fixer.findMissingResidues()
     fixer.findNonstandardResidues()
     fixer.replaceNonstandardResidues()
